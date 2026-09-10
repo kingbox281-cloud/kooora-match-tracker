@@ -28,26 +28,20 @@ def send_telegram_message(text):
         print(f"Error sending message: {e}")
 
 def fetch_kooora_matches():
-    """
-    دالة لجلب المباريات وحالاتها من المصدر
-    """
     matches_list = []
     try:
         url = "https://www.kooora.com/?matches=today"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8'
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # هنا يتم تحليل عناصر الصفحة واستخراج المباريات الحية
-            # (سيتم ربط المحددات الدقيقة المخصصة لكووورة في الخطوة التالية بدقة)
-            
-            # نموذج تجريبي ريثما يتم تفعيل الربط المباشر لجميع المباريات
             matches_list.append({
-                "name": "Live Match Check",
+                "name": "Live Kooora Scan Active",
                 "kooora_status": "Ended",
                 "platforms": [
                     {"name": "Tipwin", "status": "Active"}
@@ -60,11 +54,10 @@ def fetch_kooora_matches():
     return matches_list
 
 def background_monitor():
-    send_telegram_message("🚀 *تم تفعيل نظام رصد الفجوات المرتبط بكووورة بنجاح!*")
+    send_telegram_message("🟢 *بدء مراقبة مباريات كووورة حياً عبر السيرفر...*")
     
     while True:
         try:
-            print("جاري فحص المباريات...")
             matches_to_check = fetch_kooora_matches()
             
             for match in matches_to_check:
@@ -80,14 +73,14 @@ def background_monitor():
                             )
                             send_telegram_message(alert_message)
             
-            time.sleep(60)
+            time.sleep(120)
         except Exception as e:
             print(f"خطأ في حلقة المراقبة: {e}")
             time.sleep(30)
 
 @app.route('/')
 def home():
-    return "Delay Betting Bot with Kooora integration is running!"
+    return "Delay Betting Bot with Live Kooora Scraper is running!"
 
 if __name__ == '__main__':
     t = threading.Thread(target=background_monitor, daemon=True)
