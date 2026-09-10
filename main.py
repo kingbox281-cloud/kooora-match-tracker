@@ -28,7 +28,6 @@ def fetch_kooora_matches():
     global sent_matches
     print("بدء عملية فحص موقع كووورة للمباريات...", flush=True)
     try:
-        # استخدام الصفحة الرئيسية لكووورة لتجنب خطأ 404
         url = "https://www.kooora.com/"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -39,17 +38,22 @@ def fetch_kooora_matches():
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            matches = soup.find_all('div', class_='match')
-            print(f"عدد المباريات المكتشفة: {len(matches)}", flush=True)
+            # البحث في جميع العناصر التي تحتوي على نصوص مباريات أو جداول
+            elements = soup.find_all(['div', 'tr', 'li', 'span'])
+            print(f"إجمالي العناصر المفحوصة: {len(elements)}", flush=True)
             
-            for match in matches:
-                text = match.text.strip()
-                if "انتهت" in text or "FT" in text or "Full Time" in text:
+            found_count = 0
+            for el in elements:
+                text = el.get_text(separator=" ", strip=True)
+                # التحقق مما إذا كان النص يمثل مباراة وانتهت فعلياً
+                if ("انتهت" in text or "FT" in text or "Full Time" in text) and len(text) < 150:
                     match_name = text.replace('\n', ' - ')[:50]
+                    found_count += 1
                     if match_name not in sent_matches:
                         message = f"🚨 *تنبيه فجوة تأخير عاجل!*\n\nالمباراة: {match_name}\nالحالة: انتهت في كووورة ولكنها مستمرة في المنصة!\n⚡ سارع بالتحقق واغتنام الفرصة!"
                         send_telegram_message(message)
                         sent_matches.add(match_name)
+            print(f"تم رصد {found_count} مباراة منتهية مطابقة للشروط.", flush=True)
         else:
             print(f"موقع كووورة رفض الاتصال برمز: {response.status_code}", flush=True)
             
