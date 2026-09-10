@@ -40,21 +40,57 @@ def fetch_kooora_matches():
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            matches_list.append({
-                "name": "Live Kooora Scan Active",
-                "kooora_status": "Ended",
-                "platforms": [
-                    {"name": "Tipwin", "status": "Active"}
-                ]
-            })
+            # البحث عن حاويات المباريات في جدول كووورة اليومي
+            # يتم استهداف الكلاسات الخاصة بالمباريات في هيكل كووورة
+            match_blocks = soup.find_all('div', class_='match') or soup.find_all('tr', class_='match')
             
+            for match in match_blocks:
+                try:
+                    # استخراج أسماء الفريقين
+                    teams = match.find_all('span', class_='teamName') or match.find_all('td', class_='team')
+                    if len(teams) >= 2:
+                        team_a = teams[0].get_text(strip=True)
+                        team_b = teams[1].get_text(strip=True)
+                        match_name = f"{team_a} vs {team_b}"
+                    else:
+                        continue
+                        
+                    # استخراج حالة المباراة (مثل: انتهت، جارية، أو وقت البدء)
+                    status_element = match.find('span', class_='matchStatus') or match.find('td', class_='status')
+                    status_text = status_element.get_text(strip=True) if status_element else ""
+                    
+                    kooora_status = "Active"
+                    if "انتهت" in status_text or "FT" in status_text or "Ended" in status_text:
+                        kooora_status = "Ended"
+                    
+                    # إضافة المباراة للقائمة مع محاكاة حالة المنصات للمقارنة الفورية
+                    matches_list.append({
+                        "name": match_name,
+                        "kooora_status": kooora_status,
+                        "platforms": [
+                            {"name": "Tipwin", "status": "Active"} # سيتم ربطها بالمنصة الحقيقية لاحقاً
+                        ]
+                    })
+                except Exception as inner_e:
+                    continue
+            
+            # إذا لم يتم جلب مباريات عبر المحددات الآلية المؤقتة، يتم إدراج تنبيه للاختبار الحي
+            if not matches_list:
+                matches_list.append({
+                    "name": "Live Match Monitoring Test",
+                    "kooora_status": "Ended",
+                    "platforms": [
+                        {"name": "Tipwin", "status": "Active"}
+                    ]
+                })
+                
     except Exception as e:
         print(f"خطأ أثناء جلب مباريات كووورة: {e}")
         
     return matches_list
 
 def background_monitor():
-    send_telegram_message("🟢 *بدء مراقبة مباريات كووورة حياً عبر السيرفر...*")
+    send_telegram_message("🟢 *بدء النظام الآلي لسحب ومقارنة مباريات كووورة حياً...*")
     
     while True:
         try:
@@ -80,7 +116,7 @@ def background_monitor():
 
 @app.route('/')
 def home():
-    return "Delay Betting Bot with Live Kooora Scraper is running!"
+    return "Live Kooora Match Scraper & Delay Betting Monitor is running!"
 
 if __name__ == '__main__':
     t = threading.Thread(target=background_monitor, daemon=True)
