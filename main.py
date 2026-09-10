@@ -28,7 +28,8 @@ def fetch_kooora_matches():
     global sent_matches
     print("بدء عملية فحص موقع كووورة للمباريات...", flush=True)
     try:
-        url = "https://www.kooora.com/?matches=today"
+        # استخدام الصفحة الرئيسية لكووورة لتجنب خطأ 404
+        url = "https://www.kooora.com/"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8'
