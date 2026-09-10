@@ -21,37 +21,46 @@ def send_telegram_message(text):
         print(f"Telegram Error: {e}")
 
 def fetch_kooora_matches():
-    matches_list = []
+    finished_matches = []
     try:
         url = "https://www.kooora.com/?matches=today"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            for match in soup.find_all('div', class_='match')[:5]:
-                name = match.text.strip().replace('\n', ' - ')
-                if len(name) > 5:
-                    matches_list.append({
-                        "name": name[:50],
-                        "kooora_status": "Live",
-                        "platforms": [{"name": "Tipwin", "status": "Active"}]
-                    })
+            # البحث عن المباريات التي تظهر حالياً في كووورة وانتهت أو أغلقت
+            for match in soup.find_all('div', class_='match'):
+                text = match.text.strip()
+                # التحقق مما إذا كانت المباراة منتهية أو انتهى وقتها
+                if "انتهت" in text or "FT" in text or "Full Time" in text:
+                    match_name = text.replace('\n', ' - ')[:50]
+                    finished_matches.append(match_name)
+                    
+                    # إرسال تنبيه فوري عبر تيليجرام يوضح أن المباراة انتهت في كووورة
+                    alert_text = (
+                        f"🚨 *تنبيه فرصة Delay Betting*\n\n"
+                        f"⚽ *المباراة:* {match_name}\n"
+                        f"📌 *الحالة:* انتهت في كووورة!\n"
+                        f"⚠️ *تحقق فوراً من:* Tipwin / Merkur Bets / sportwetten.de (قد تكون لم تُغلق بعد)"
+                    )
+                    send_telegram_message(alert_text)
+                    
     except Exception as e:
-        print(f"خطأ: {e}")
-    return matches_list
+        print(f"خطأ أثناء جلب المباريات: {e}")
+    return finished_matches
 
 def background_monitor():
     while True:
         try:
-            matches = fetch_kooora_matches()
-            print(f"تم فحص المباريات: عدد المباريات المكتشفة {len(matches)}")
+            print("جاري فحص حالة المباريات للتأكد من المباريات المنتهية...")
+            fetch_kooora_matches()
         except Exception as e:
             print(f"Monitor error: {e}")
-        time.sleep(60)
+        time.sleep(60)  # يتم الفحص تلقائياً كل دقيقة
 
 @app.route('/')
 def home():
-    return "Kooora Match Tracker is Running!"
+    return "Kooora Delay Betting Monitor is Running!"
 
 if __name__ == '__main__':
     threading.Thread(target=background_monitor, daemon=True).start()
