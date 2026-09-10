@@ -1,3 +1,29 @@
+import os
+import time
+import threading
+import requests
+from bs4 import BeautifulSoup
+from flask import Flask
+
+app = Flask(__name__)
+
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+
+sent_matches = set()
+
+def send_telegram_message(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram tokens missing!", flush=True)
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    try:
+        response = requests.post(url, json=payload, timeout=5)
+        print(f"Telegram Response: {response.status_code}", flush=True)
+    except Exception as e:
+        print(f"Telegram Error: {e}", flush=True)
+
 def fetch_kooora_matches():
     global sent_matches
     print("بدء عملية فحص موقع كووورة للمباريات...", flush=True)
@@ -29,3 +55,23 @@ def fetch_kooora_matches():
         print("تم الانتهاء من دورة الفحص.", flush=True)
     except Exception as e:
         print(f"Scraping Error Details: {e}", flush=True)
+
+def background_tracker():
+    print("خيط الخلفية (Background Tracker) بدأ بالعمل...", flush=True)
+    while True:
+        try:
+            fetch_kooora_matches()
+        except Exception as err:
+            print(f"Error in background loop: {err}", flush=True)
+        time.sleep(60)
+
+@app.route('/')
+def home():
+    return "Kooora Match Tracker is Running Live!"
+
+if __name__ == '__main__':
+    t = threading.Thread(target=background_tracker, daemon=True)
+    t.start()
+    
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
