@@ -10,6 +10,9 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
+# مجموعة لحفظ المباريات التي تم إرسال تنبيه لها لعدم تكرارها
+sent_matches = set()
+
 def send_telegram_message(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -21,48 +24,43 @@ def send_telegram_message(text):
         print(f"Telegram Error: {e}")
 
 def fetch_kooora_matches():
-    finished_matches = []
+    global sent_matches
     try:
         url = "https://www.kooora.com/?matches=today"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # البحث عن المباريات التي تظهر حالياً في كووورة وانتهت أو أغلقت
+            # البحث عن المباريات
             for match in soup.find_all('div', class_='match'):
                 text = match.text.strip()
-                # التحقق مما إذا كانت المباراة منتهية أو انتهى وقتها
                 if "انتهت" in text or "FT" in text or "Full Time" in text:
                     match_name = text.replace('\n', ' - ')[:50]
-                    finished_matches.append(match_name)
                     
-                    # إرسال تنبيه فوري عبر تيليجرام يوضح أن المباراة انتهت في كووورة
-                    alert_text = (
-                        f"🚨 *تنبيه فرصة Delay Betting*\n\n"
-                        f"⚽ *المباراة:* {match_name}\n"
-                        f"📌 *الحالة:* انتهت في كووورة!\n"
-                        f"⚠️ *تحقق فوراً من:* Tipwin / Merkur Bets / sportwetten.de (قد تكون لم تُغلق بعد)"
-                    )
-                    send_telegram_message(alert_text)
-                    
+                    # التحقق مما إذا تم إرسال تنبيه لهذه المباراة من قبل
+                    if match_name not in sent_matches:
+                        message = f"🚨 *تنبيه فجوة تأخير عاجل!*\n\nالمباراة: {match_name}\nالحالة: انتهت في كووورة ولكنها مستمرة في المنصة!\n⚡ سارع بالتحقق واغتنام الفرصة!"
+                        send_telegram_message(message)
+                        sent_matches.add(match_name)
+        print("تم فحص المباريات بنجاح...")
     except Exception as e:
-        print(f"خطأ أثناء جلب المباريات: {e}")
-    return finished_matches
+        print(f"Scraping Error: {e}")
 
-def background_monitor():
+def background_tracker():
+    """حلقة تكرار تعمل في الخلفية لفحص المباريات كل 60 ثانية"""
     while True:
-        try:
-            print("جاري فحص حالة المباريات للتأكد من المباريات المنتهية...")
-            fetch_kooora_matches()
-        except Exception as e:
-            print(f"Monitor error: {e}")
-        time.sleep(60)  # يتم الفحص تلقائياً كل دقيقة
+        fetch_kooora_matches()
+        time.sleep(60) # الانتظار لمدة دقيقة قبل الفحص التالي
 
 @app.route('/')
 def home():
-    return "Kooora Delay Betting Monitor is Running!"
+    return "Kooora Match Tracker is Running Live!"
 
 if __name__ == '__main__':
-    threading.Thread(target=background_monitor, daemon=True).start()
-    port = int(os.environ.get('PORT', 5000))
+    # تشغيل حلقة التكرار في خيط منفصل (Background Thread)
+    t = threading.Thread(target=background_tracker, daemon=True)
+    t.start()
+    
+    # تشغيل سيرفر Flask لاستيفاء متطلبات Render
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
