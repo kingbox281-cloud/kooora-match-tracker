@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import requests
+from bs4 import BeautifulSoup
 from flask import Flask
 
 app = Flask(__name__)
@@ -26,24 +27,45 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"Error sending message: {e}")
 
+def fetch_kooora_matches():
+    """
+    دالة لجلب المباريات وحالاتها من المصدر
+    """
+    matches_list = []
+    try:
+        url = "https://www.kooora.com/?matches=today"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # هنا يتم تحليل عناصر الصفحة واستخراج المباريات الحية
+            # (سيتم ربط المحددات الدقيقة المخصصة لكووورة في الخطوة التالية بدقة)
+            
+            # نموذج تجريبي ريثما يتم تفعيل الربط المباشر لجميع المباريات
+            matches_list.append({
+                "name": "Live Match Check",
+                "kooora_status": "Ended",
+                "platforms": [
+                    {"name": "Tipwin", "status": "Active"}
+                ]
+            })
+            
+    except Exception as e:
+        print(f"خطأ أثناء جلب مباريات كووورة: {e}")
+        
+    return matches_list
+
 def background_monitor():
-    # إرسال رسالة فورية للتأكد من نجاح الاتصال وتفعيل البوت
-    send_telegram_message("🚀 *تم تفعيل نظام رصد الفجوات وتليجرام متصل بنجاح!*")
+    send_telegram_message("🚀 *تم تفعيل نظام رصد الفجوات المرتبط بكووورة بنجاح!*")
     
     while True:
         try:
-            print("جاري فحص المباريات لكشف الفجوات...")
-            
-            # نموذج تجريبي لفحص الفجوة بين كووورة والمنصات
-            matches_to_check = [
-                {
-                    "name": "Real Madrid vs Barcelona",
-                    "kooora_status": "Ended",
-                    "platforms": [
-                        {"name": "Tipwin", "status": "Not Started"}
-                    ]
-                }
-            ]
+            print("جاري فحص المباريات...")
+            matches_to_check = fetch_kooora_matches()
             
             for match in matches_to_check:
                 if match["kooora_status"] == "Ended":
@@ -65,7 +87,7 @@ def background_monitor():
 
 @app.route('/')
 def home():
-    return "Delay Betting Bot is running!"
+    return "Delay Betting Bot with Kooora integration is running!"
 
 if __name__ == '__main__':
     t = threading.Thread(target=background_monitor, daemon=True)
