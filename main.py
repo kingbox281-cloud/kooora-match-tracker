@@ -38,22 +38,31 @@ def fetch_kooora_matches():
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # البحث في جميع العناصر التي تحتوي على نصوص مباريات أو جداول
-            elements = soup.find_all(['div', 'tr', 'li', 'span'])
-            print(f"إجمالي العناصر المفحوصة: {len(elements)}", flush=True)
+            elements = soup.find_all(['div', 'tr', 'li'])
             
             found_count = 0
             for el in elements:
                 text = el.get_text(separator=" ", strip=True)
-                # التحقق مما إذا كان النص يمثل مباراة وانتهت فعلياً
-                if ("انتهت" in text or "FT" in text or "Full Time" in text) and len(text) < 150:
+                
+                # تصفية دقيقة: يجب أن يحتوي العنصر على كلمات انتهاء المباراة
+                has_ended = "انتهت" in text or "FT" in text or "Full Time" in text
+                
+                # تصفية إضافية لضمان أنها مباراة وليست مقالاً (تحتوي على أرقام نتائج أو رمز ضد مثل ضد أو -)
+                is_match_format = "-" in text or ":" in text or any(char.isdigit() for char in text)
+                
+                if has_ended and is_match_format and len(text) < 120:
                     match_name = text.replace('\n', ' - ')[:50]
+                    # استبعاد النصوص التي تبدو كعناوين أخبار عامة
+                    if "يومًا" in match_name or "الحرب" in match_name or "من الغياب" in match_name:
+                        continue
+                        
                     found_count += 1
                     if match_name not in sent_matches:
                         message = f"🚨 *تنبيه فجوة تأخير عاجل!*\n\nالمباراة: {match_name}\nالحالة: انتهت في كووورة ولكنها مستمرة في المنصة!\n⚡ سارع بالتحقق واغتنام الفرصة!"
                         send_telegram_message(message)
                         sent_matches.add(match_name)
-            print(f"تم رصد {found_count} مباراة منتهية مطابقة للشروط.", flush=True)
+                        
+            print(f"تم رصد {found_count} مباراة حقيقية منتهية.", flush=True)
         else:
             print(f"موقع كووورة رفض الاتصال برمز: {response.status_code}", flush=True)
             
