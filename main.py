@@ -26,9 +26,10 @@ def send_telegram_message(text):
 
 def fetch_kooora_matches():
     global sent_matches
-    print("بدء عملية فحص موقع كووورة للمباريات...", flush=True)
+    print("بدء عملية فحص مباريات اليوم في كووورة...", flush=True)
     try:
-        url = "https://www.kooora.com/"
+        # استخدام رابط مباريات اليوم المباشر
+        url = "https://www.kooora.com/?matches=today"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8'
@@ -38,32 +39,39 @@ def fetch_kooora_matches():
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            elements = soup.find_all(['div', 'tr', 'li'])
             
+            # البحث في مربعات أو جداول المباريات المخصصة فقط لتجنب الأخبار
+            match_boxes = soup.find_all(['div', 'table', 'li'], class_=lambda x: x and ('match' in x or 'game' in x or 'score' in x))
+            
+            if not match_boxes:
+                # إذا لم تجد الفئات المحددة، نبحث في الجداول العامة التي تحتوي على نتائج
+                match_boxes = soup.find_all('tr')
+                
             found_count = 0
-            for el in elements:
-                text = el.get_text(separator=" ", strip=True)
+            for box in match_boxes:
+                text = box.get_text(separator=" ", strip=True)
                 
-                # التحقق من أن المباراة انتهت فعلياً
-                has_ended = "انتهت" in text or "FT" in text or "Full Time" in text
-                is_match_format = "-" in text or ":" in text or any(char.isdigit() for char in text)
+                # شرط أن تكون مباراة حقيقية انتهت (تحتوي على علامة انتهاء ونتيجة أهداف رقمية)
+                is_ended = "انتهت" in text or "FT" in text or "Full Time" in text
+                has_teams_and_score = any(char.isdigit() for char in text) and ("-" in text or ":" in text)
                 
-                if has_ended and is_match_format and len(text) < 120:
-                    match_name = text.replace('\n', ' - ')[:50]
+                # استبعاد النصوص الطويلة أو العناوين الإخبارية
+                if is_ended and has_teams_and_score and len(text) < 80 and "رئيس" not in text and "يومًا" not in text:
+                    match_name = text.replace('\n', ' - ')[:60]
                     
-                    # استبعاد العناوين الإخبارية
-                    if "يومًا" in match_name or "الحرب" in match_name or "من الغياب" in match_name:
-                        continue
-                        
                     found_count += 1
                     if match_name not in sent_matches:
-                        # الصيغة الدقيقة المخصصة لـ Tipwin, Merkur Bets, sportwetten.de
-                        message = f"🚨 *تنبيه فجوة تأخير عاجل!*\n\nالمباراة: {match_name}\n\n🛑 الحالة في المصدر الرسمي (كووورة): انتهت تماماً\n⏳ الحالة في المنصة (Tipwin / Merkur Bets / sportwetten.de): لا تزال معروضة أو لم تبدأ بعد!\n\n⚡ سارع بالتحقق واغتنام الفرصة!"
-                        
+                        message = (
+                            f"🚨 *تنبيه فجوة تأخير عاجل!*\n\n"
+                            f"المباراة: {match_name}\n\n"
+                            f"🛑 الحالة في المصدر الرسمي (كووورة): انتهت تماماً\n"
+                            f"⏳ الحالة في المنصة (Tipwin / Merkur Bets / sportwetten.de): لا تزال معروضة أو لم تبدأ بعد!\n\n"
+                            f"⚡ سارع بالتحقق واغتنام الفرصة!"
+                        )
                         send_telegram_message(message)
                         sent_matches.add(match_name)
                         
-            print(f"تم رصد {found_count} مباراة حقيقية منتهية.", flush=True)
+            print(f"تم رصد {found_count} مباراة منتهية مطابقة للشروط.", flush=True)
         else:
             print(f"موقع كووورة رفض الاتصال برمز: {response.status_code}", flush=True)
             
