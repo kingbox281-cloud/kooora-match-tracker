@@ -13,8 +13,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
 KOOORA_URL = "https://www.kooora.com/?matches=today"
 
-# قائمة المنصات الموسعة التي طلبته إضافتها
+# القائمة الشاملة: تضم المنصات القديمة والجديدة معاً بدون حذف أي شيء
 TARGET_BOOKMAKERS = [
+    "Tipwin", "Merkur Bets", "sportwetten.de",
     "NEO.bet", "bet365", "Winamax", "bwin", "Betano", 
     "Bet-at-home", "ODDSET", "Interwetten", "DAZN Bet", 
     "AdmiralBet", "Betway", "LeoVegas", "VBET", "Bet3000"
@@ -40,12 +41,8 @@ def send_telegram_alert(message):
 
 def check_delayed_bookmakers(row_text):
     """
-    ملاحظة: يمكنك ربط هذه الدالة لاحقاً بالفحص الفعلي لكل منصة.
-    حسب رغبتك، سيقوم البوت بتحديد المنصات التي لم تبدأ فيها المباراة بعد.
-    في هذا المثال التوضيحي، نقوم بفلترة محاكاة أو يمكنك ربطها بـ API الفحص الخاص بك.
+    إرجاع القائمة الشاملة التي تضم جميع المنصات المتابعة.
     """
-    # كمثال مبدئي، سنقوم بتضمين القائمة التي لم تبدأ بعد عندما تنتهي المباراة في كووورة
-    # يمكنك تعديل هذا الجزء ليطابق طريقة جلب البيانات الفعلية لكل منصة من المنصات التالية:
     return TARGET_BOOKMAKERS
 
 def check_kooora_matches():
@@ -92,10 +89,10 @@ def check_kooora_matches():
                                 if country_elem:
                                     country_name = country_elem.get_text(strip=True) if country_elem.get_text(strip=True) else country_elem.get('alt', 'غير محددة')
 
-                            # جلب المنصات التي لم تبدأ بعد بناءً على القائمة الموسعة
+                            # جلب جميع المنصات (القديمة والجديدة)
                             delayed_platforms = check_delayed_bookmakers(row_text)
 
-                            # بناء رسالة تيليجرام بالشكل الذي حددته
+                            # بناء رسالة تيليجرام
                             alert_message = (
                                 f"🚨 *تنبيه فرصة انتهاء مباراة (FT)*\n\n"
                                 f"🌍 الدولة: *{country_name}*\n"
@@ -123,7 +120,7 @@ def home():
     return "Kooora Delay Betting Bot is running and monitoring 24/7!"
 
 if __name__ == "__main__":
-    send_telegram_alert("✅ رسالة تجريبية: تم تحديث البوت وإضافة القائمة الموسعة للمنصات بنجاح!")
+    send_telegram_alert("✅ رسالة تجريبية: تم دمج المنصات القديمة والجديدة بنجاح!")
 
     t = threading.Thread(target=check_kooora_matches, daemon=True)
     t.start()
