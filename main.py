@@ -109,3 +109,8 @@ if __name__ == "__main__":
     # تشغيل تطبيق Flask
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+    # ... الأكواد الموجودة لديك مسبقاً في نهاية الملف ...
+
+# أضف السطر التجريبي هنا في النهاية:
+requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": "✅ رسالة تجريبية: البوت متصل ويعمل بنجاح!"})
+
