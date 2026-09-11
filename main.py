@@ -1,4 +1,3 @@
-
 import os
 import time
 import threading
@@ -8,7 +7,7 @@ from flask import Flask
 
 app = Flask(__name__)
 
-# إعدادات تيليجرام (تأكد من صحة المتغيرات البيئية في Render أو ضعها مباشرة هنا)
+# إعدادات تيليجرام
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
@@ -44,9 +43,6 @@ def check_kooora_matches():
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # البحث عن المباريات في الصفحة
-                match_blocks = soup.find_all(['tr', 'div'], class_=lambda x: x and ('match' in x or 'game' in x or 'torne' in x))
-                
                 tournaments = soup.find_all(['div', 'table'], class_=lambda x: x and ('tour' in x or 'championship' in x or 'competition' in x))
                 
                 if not tournaments:
@@ -59,26 +55,34 @@ def check_kooora_matches():
                 for row in match_rows:
                     row_text = row.get_text(strip=True)
                     
-                    # التحقق من أن الصف يمثل مباراة منتهية
                     is_finished = any(keyword in row_text.lower() for keyword in ['ft', 'انتهت', 'مباراة انتهت', 'ركلات ترجيح', 'نهاية'])
                     has_scores = any(char.isdigit() for char in row_text)
                     
                     if is_finished and has_scores:
                         match_id = hash(row_text)
                         if match_id not in sent_alerts:
+                            # استخراج اسم البطولة والدولة إن وجد
                             tournament_name = "بطولة غير محددة"
+                            country_name = "غير محددة"
                             parent_table = row.find_parent(['table', 'div', 'section'])
                             if parent_table:
                                 header_elem = parent_table.find(['th', 'div', 'span', 'h2', 'h3'], class_=lambda x: x and ('title' in x or 'header' in x or 'name' in x or 'tour' in x))
                                 if header_elem:
                                     tournament_name = header_elem.get_text(strip=True)
+                                
+                                # محاولة البحث عن اسم الدولة من الحاوية المحيطة
+                                country_elem = parent_table.find(['span', 'div', 'img'], class_=lambda x: x and ('country' in x or 'flag' in x or 'nation' in x))
+                                if country_elem:
+                                    country_name = country_elem.get_text(strip=True) if country_elem.get_text(strip=True) else country_elem.get('alt', 'غير محددة')
 
+                            # رسالة منسقة ومفصلة تعرض تفاصيل الدولة، الدوري، المباراة، والمنصات المستهدفة
                             alert_message = (
                                 f"🚨 *تنبيه فجوة تأخير عاجل!*\n\n"
-                                f"🏆 البطولة: *{tournament_name}*\n"
-                                f"المباراة والنطاق: `{row_text[:100]}`\n\n"
-                                f"🛑 الحالة في المصدر الرسمي (كووورة): انتهت تماماً\n"
-                                f"⏳ الحالة في المنصة (Tipwin / Merkur Bets / sportwetten.de): لا تزال معروضة أو متاحة للرهان!\n\n"
+                                f"🌍 الدولة: *{country_name}*\n"
+                                f"🏆 الدوري / البطولة: *{tournament_name}*\n"
+                                f"⚽ تفاصيل المباراة والنتيجة في كووورة: `{row_text[:100]}`\n\n"
+                                f"🛑 الحالة في المصدر الرسمي: انتهت تماماً\n"
+                                f"⏳ الحالة في المنصات (Tipwin / Merkur Bets / sportwetten.de): النتيجة أو المباراة لا تزال معروضة للرهان وتختلف عن المصدر الرسمي!\n\n"
                                 f"⚡ سارع بالتحقق واغتنام الفرصة!"
                             )
                             
@@ -95,13 +99,10 @@ def home():
     return "Kooora Delay Betting Bot is running and monitoring 24/7!"
 
 if __name__ == "__main__":
-    # إرسال رسالة تجريبية للتأكد من أن الاتصال يعمل فور التشغيل
-    send_telegram_alert("✅ رسالة تجريبية: البوت متصل ويعمل بنجاح!")
+    send_telegram_alert("✅ رسالة تجريبية: تم تحديث البوت لإظهار تفاصيل الدولة والدوري والمنصات بنجاح!")
 
-    # تشغيل مراقبة المباريات في خلفية مستقلة
     t = threading.Thread(target=check_kooora_matches, daemon=True)
     t.start()
     
-    # تشغيل تطبيق Flask
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
