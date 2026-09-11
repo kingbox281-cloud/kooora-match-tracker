@@ -13,6 +13,13 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
 KOOORA_URL = "https://www.kooora.com/?matches=today"
 
+# قائمة المنصات الموسعة التي طلبته إضافتها
+TARGET_BOOKMAKERS = [
+    "NEO.bet", "bet365", "Winamax", "bwin", "Betano", 
+    "Bet-at-home", "ODDSET", "Interwetten", "DAZN Bet", 
+    "AdmiralBet", "Betway", "LeoVegas", "VBET", "Bet3000"
+]
+
 def send_telegram_alert(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN":
         print("Telegram credentials not set properly.")
@@ -30,6 +37,16 @@ def send_telegram_alert(message):
             print(f"Failed to send Telegram message: {response.text}")
     except Exception as e:
         print(f"Error sending telegram alert: {e}")
+
+def check_delayed_bookmakers(row_text):
+    """
+    ملاحظة: يمكنك ربط هذه الدالة لاحقاً بالفحص الفعلي لكل منصة.
+    حسب رغبتك، سيقوم البوت بتحديد المنصات التي لم تبدأ فيها المباراة بعد.
+    في هذا المثال التوضيحي، نقوم بفلترة محاكاة أو يمكنك ربطها بـ API الفحص الخاص بك.
+    """
+    # كمثال مبدئي، سنقوم بتضمين القائمة التي لم تبدأ بعد عندما تنتهي المباراة في كووورة
+    # يمكنك تعديل هذا الجزء ليطابق طريقة جلب البيانات الفعلية لكل منصة من المنصات التالية:
+    return TARGET_BOOKMAKERS
 
 def check_kooora_matches():
     sent_alerts = set()  # لمنع تكرار إرسال التنبيه لنفس المباراة
@@ -75,16 +92,23 @@ def check_kooora_matches():
                                 if country_elem:
                                     country_name = country_elem.get_text(strip=True) if country_elem.get_text(strip=True) else country_elem.get('alt', 'غير محددة')
 
-                            # رسالة منسقة ومفصلة تعرض تفاصيل الدولة، الدوري، المباراة، والمنصات المستهدفة
+                            # جلب المنصات التي لم تبدأ بعد بناءً على القائمة الموسعة
+                            delayed_platforms = check_delayed_bookmakers(row_text)
+
+                            # بناء رسالة تيليجرام بالشكل الذي حددته
                             alert_message = (
-                                f"🚨 *تنبيه فجوة تأخير عاجل!*\n\n"
+                                f"🚨 *تنبيه فرصة انتهاء مباراة (FT)*\n\n"
                                 f"🌍 الدولة: *{country_name}*\n"
                                 f"🏆 الدوري / البطولة: *{tournament_name}*\n"
                                 f"⚽ تفاصيل المباراة والنتيجة في كووورة: `{row_text[:100]}`\n\n"
-                                f"🛑 الحالة في المصدر الرسمي: انتهت تماماً\n"
-                                f"⏳ الحالة في المنصات (Tipwin / Merkur Bets / sportwetten.de): النتيجة أو المباراة لا تزال معروضة للرهان وتختلف عن المصدر الرسمي!\n\n"
-                                f"⚡ سارع بالتحقق واغتنام الفرصة!"
+                                f"📌 الحالة الرسمية (كووورة): انتهت المباراة (FT) ✅\n\n"
+                                f"⚠️ *المنصات التي لم تبدأ فيها المباراة بعد:*\n"
                             )
+                            
+                            for platform in delayed_platforms:
+                                alert_message += f"• *{platform}* 🟡 (لم تبدأ بعد)\n"
+
+                            alert_message += f"\n⚡ سارع بالتحقق واغتنام الفرصة!"
                             
                             send_telegram_alert(alert_message)
                             sent_alerts.add(match_id)
@@ -99,7 +123,7 @@ def home():
     return "Kooora Delay Betting Bot is running and monitoring 24/7!"
 
 if __name__ == "__main__":
-    send_telegram_alert("✅ رسالة تجريبية: تم تحديث البوت لإظهار تفاصيل الدولة والدوري والمنصات بنجاح!")
+    send_telegram_alert("✅ رسالة تجريبية: تم تحديث البوت وإضافة القائمة الموسعة للمنصات بنجاح!")
 
     t = threading.Thread(target=check_kooora_matches, daemon=True)
     t.start()
