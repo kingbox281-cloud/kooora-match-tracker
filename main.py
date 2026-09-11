@@ -115,3 +115,14 @@ if __name__ == "__main__":
 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": "✅ رسالة تجريبية: البوت متصل ويعمل بنجاح!"})
 send_telegram_alert
 
+if __name__ == "__main__":
+    # إرسال رسالة تجريبية للتأكد من أن الاتصال يعمل فور التشغيل
+    send_telegram_alert("✅ رسالة تجريبية: البوت متصل ويعمل بنجاح!")
+
+    # تشغيل مراقبة المباريات في خلفية مستقلة لتعمل بالتوازي مع سيرفر الويب
+    t = threading.Thread(target=check_kooora_matches, daemon=True)
+    t.start()
+    
+    # تشغيل تطبيق Flask
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
