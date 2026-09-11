@@ -1,3 +1,4 @@
+
 import os
 import time
 import threading
@@ -43,15 +44,12 @@ def check_kooora_matches():
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # البحث عن المباريات في الصفحة (تختلف الهيكلة حسب تحديث الموقع، وغالباً تكون مقسمة حسب البطولات)
-                # سنبحث عن عناصر البطولات والمباريات ضمنها
+                # البحث عن المباريات في الصفحة
                 match_blocks = soup.find_all(['tr', 'div'], class_=lambda x: x and ('match' in x or 'game' in x or 'torne' in x))
                 
-                # طريقة بديلة وشاملة للبحث عن البطولات والمباريات
                 tournaments = soup.find_all(['div', 'table'], class_=lambda x: x and ('tour' in x or 'championship' in x or 'competition' in x))
                 
                 if not tournaments:
-                    # إذا لميل العثور على حاويات بطولات محددة، نبحث عن جميع عناصر المباريات المباشرة
                     match_rows = soup.find_all('tr')
                 else:
                     match_rows = []
@@ -61,16 +59,13 @@ def check_kooora_matches():
                 for row in match_rows:
                     row_text = row.get_text(strip=True)
                     
-                    # التحقق من أن الصف يمثل مباراة منتهية (يحتوي على مؤشر انتهاء مثل FT، انتهت، أو نتيجة رقمية مع علامة انتهاء)
+                    # التحقق من أن الصف يمثل مباراة منتهية
                     is_finished = any(keyword in row_text.lower() for keyword in ['ft', 'انتهت', 'مباراة انتهت', 'ركلات ترجيح', 'نهاية'])
-                    
-                    # استبعاد الأخبار والعناوين التي لا تحتوي على أرفاق فرق أو نتائج
                     has_scores = any(char.isdigit() for char in row_text)
                     
                     if is_finished and has_scores:
                         match_id = hash(row_text)
                         if match_id not in sent_alerts:
-                            # محاولة استخراج اسم البطولة أو الدوري المحيط بالمباراة
                             tournament_name = "بطولة غير محددة"
                             parent_table = row.find_parent(['table', 'div', 'section'])
                             if parent_table:
@@ -78,7 +73,6 @@ def check_kooora_matches():
                                 if header_elem:
                                     tournament_name = header_elem.get_text(strip=True)
 
-                            # تنسيق رسالة التنبيه الجديدة مع تفاصيل الدوري
                             alert_message = (
                                 f"🚨 *تنبيه فجوة تأخير عاجل!*\n\n"
                                 f"🏆 البطولة: *{tournament_name}*\n"
@@ -94,7 +88,6 @@ def check_kooora_matches():
         except Exception as e:
             print(f"Error in scraping loop: {e}")
             
-        # الانتظار 60 ثانية قبل إعادة الفحص لتجنب الحظر ولضمان السرعة
         time.sleep(60)
 
 @app.route("/")
@@ -102,24 +95,10 @@ def home():
     return "Kooora Delay Betting Bot is running and monitoring 24/7!"
 
 if __name__ == "__main__":
-    # تشغيل مراقبة المباريات في خلفية مستقلة لتعمل بالتوازي مع سيرفر الويب
-    t = threading.Thread(target=check_kooora_matches, daemon=True)
-    t.start()
-    
-    # تشغيل تطبيق Flask
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-    # ... الأكواد الموجودة لديك مسبقاً في نهاية الملف ...
-
-# أضف السطر التجريبي هنا في النهاية:
-requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": "✅ رسالة تجريبية: البوت متصل ويعمل بنجاح!"})
-send_telegram_alert
-
-if __name__ == "__main__":
     # إرسال رسالة تجريبية للتأكد من أن الاتصال يعمل فور التشغيل
     send_telegram_alert("✅ رسالة تجريبية: البوت متصل ويعمل بنجاح!")
 
-    # تشغيل مراقبة المباريات في خلفية مستقلة لتعمل بالتوازي مع سيرفر الويب
+    # تشغيل مراقبة المباريات في خلفية مستقلة
     t = threading.Thread(target=check_kooora_matches, daemon=True)
     t.start()
     
