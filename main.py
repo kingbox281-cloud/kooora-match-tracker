@@ -113,4 +113,5 @@ if __name__ == "__main__":
 
 # أضف السطر التجريبي هنا في النهاية:
 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": "✅ رسالة تجريبية: البوت متصل ويعمل بنجاح!"})
+send_telegram_alert
 
