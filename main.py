@@ -15,7 +15,7 @@ def home():
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID')
 
-KOOORA_URL = "https://www.kooora.com/?matches=today"
+KOOORA_URL = "https://www.kooora.com/default.aspx?g=matches"
 
 TARGET_BOOKMAKERS = [
     "Tipico", "Tipwin", "Merkur Bets", "sportwetten.de", "NEO.bet", 
@@ -54,7 +54,7 @@ def format_and_send_alert(match_name, country, league, status_type):
         f"{title}\n\n"
         f"⚽ المباراة: **{match_name}**\n"
         f"🌍 الدولة: **{country}**\n"
-        f"🏆 البطولة: ****\n"
+        f"🏆 البطولة: **{league}**\n"
         f"⏰ وقت التحديث: `{current_time}`\n"
         f"🛑 الحالة في المصدر الرسمي (كووورة): {status_text}\n"
         f"⏳ الحالة في المنصات: **لا تزال معروضة أو لم يتم إيقاف الرهان بعد في المنصات المستهدفة أدناه!**\n\n"
@@ -76,7 +76,6 @@ def check_kooora_matches():
         response = requests.get(KOOORA_URL, headers=headers, timeout=15)
         print(f"Kooora response status: {response.status_code}")
         
-        # رسالة تأكيد تصلك على التيليجرام في كل عملية فحص دورية لتطمئن أن البوت يعيثث ويحدث
         current_time = datetime.now().strftime("%H:%M:%S")
         send_telegram_message(f"🔄 البوت قام بعملية فحص حديثة لموقع كووورة بنجاح في الساعة `{current_time}` وحالة الاتصال: `{response.status_code}`")
         
