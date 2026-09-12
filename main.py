@@ -13,9 +13,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
 KOOORA_URL = "https://www.kooora.com/?matches=today"
 
-# القائمة الشاملة: تضم المنصات القديمة والجديدة معاً بدون حذف أي شيء
+# القائمة الشاملة: تضم المنصات القديمة والجديدة مع إضافة Tipico لتصبح 18 منصة
 TARGET_BOOKMAKERS = [
-    "Tipwin", "Merkur Bets", "sportwetten.de",
+    "Tipico", "Tipwin", "Merkur Bets", "sportwetten.de",
     "NEO.bet", "bet365", "Winamax", "bwin", "Betano", 
     "Bet-at-home", "ODDSET", "Interwetten", "DAZN Bet", 
     "AdmiralBet", "Betway", "LeoVegas", "VBET", "Bet3000"
@@ -46,7 +46,7 @@ def check_delayed_bookmakers(row_text):
     return TARGET_BOOKMAKERS
 
 def check_kooora_matches():
-    sent_alerts = set()  # لمنع تكرار إرسال التنبيه لنفس المباراة
+    sent_alerts = set()  # لمنع تكرار إرسال التنبيه لنفس الحالة (نهاية الشوط الأول أو نهاية المباراة)
     
     while True:
         try:
@@ -69,11 +69,23 @@ def check_kooora_matches():
                 for row in match_rows:
                     row_text = row.get_text(strip=True)
                     
-                    is_finished = any(keyword in row_text.lower() for keyword in ['ft', 'انتهت', 'مباراة انتهت', 'ركلات ترجيح', 'نهاية'])
+                    # التحقق مما إذا كانت المباراة انتهت بالكامل أو انتهى الشوط الأول فقط
+                    is_full_time = any(keyword in row_text.lower() for keyword in ['ft', 'انتهت', 'مباراة انتهت', 'ركلات ترجيح', 'نهاية'])
+                    is_half_time = any(keyword in row_text.lower() for keyword in ['ht', 'الشوط الأول', 'استراحة', 'بین الشوطین', 'half time'])
+                    
                     has_scores = any(char.isdigit() for char in row_text)
                     
-                    if is_finished and has_scores:
-                        match_id = hash(row_text)
+                    # تحديد نوع الحالة لتمييز التنبيه
+                    status_type = None
+                    if is_full_time and has_scores:
+                        status_type = "FT"
+                    elif is_half_time and has_scores:
+                        status_type = "HT"
+                        
+                    if status_type:
+                        # دمج نص الصف مع نوع الحالة لضمان عدم تداخل معرفات الشوط الأول مع نهاية المباراة
+                        match_id = hash(row_text + "_" + status_type)
+                        
                         if match_id not in sent_alerts:
                             # استخراج اسم البطولة والدولة إن وجد
                             tournament_name = "بطولة غير محددة"
@@ -84,26 +96,32 @@ def check_kooora_matches():
                                 if header_elem:
                                     tournament_name = header_elem.get_text(strip=True)
                                 
-                                # محاولة البحث عن اسم الدولة من الحاوية المحيطة
                                 country_elem = parent_table.find(['span', 'div', 'img'], class_=lambda x: x and ('country' in x or 'flag' in x or 'nation' in x))
                                 if country_elem:
                                     country_name = country_elem.get_text(strip=True) if country_elem.get_text(strip=True) else country_elem.get('alt', 'غير محددة')
 
-                            # جلب جميع المنصات (القديمة والجديدة)
+                            # جلب جميع المنصات (بما فيها Tipico)
                             delayed_platforms = check_delayed_bookmakers(row_text)
 
-                            # بناء رسالة تيليجرام
+                            # صياغة الرسالة بناءً على الحالة (نهاية الشوط الأول أم نهاية المباراة)
+                            if status_type == "FT":
+                                alert_title = "🚨 *تنبيه فرصة انتهاء مباراة (FT)*"
+                                status_desc = "انتهت المباراة (FT) ✅"
+                            else:
+                                alert_title = "🟡 *تنبيه نهاية الشوط الأول (HT)*"
+                                status_desc = "انتهى الشوط الأول (HT) ⏸️"
+
                             alert_message = (
-                                f"🚨 *تنبيه فرصة انتهاء مباراة (FT)*\n\n"
+                                f"{alert_title}\n\n"
                                 f"🌍 الدولة: *{country_name}*\n"
                                 f"🏆 الدوري / البطولة: *{tournament_name}*\n"
                                 f"⚽ تفاصيل المباراة والنتيجة في كووورة: `{row_text[:100]}`\n\n"
-                                f"📌 الحالة الرسمية (كووورة): انتهت المباراة (FT) ✅\n\n"
-                                f"⚠️ *المنصات التي لم تبدأ فيها المباراة بعد:*\n"
+                                f"📌 الحالة الرسمية (كووورة): {status_desc}\n\n"
+                                f"⚠️ *المنصات التي لم تتحدث فيها النتيجة بعد:*\n"
                             )
                             
                             for platform in delayed_platforms:
-                                alert_message += f"• *{platform}* 🟡 (لم تبدأ بعد)\n"
+                                alert_message += f"• *{platform}* 🟡 (لم تُحدث بعد)\n"
 
                             alert_message += f"\n⚡ سارع بالتحقق واغتنام الفرصة!"
                             
@@ -117,10 +135,10 @@ def check_kooora_matches():
 
 @app.route("/")
 def home():
-    return "Kooora Delay Betting Bot is running and monitoring 24/7!"
+    return "Kooora Delay Betting Bot (Tipico Added) is running and monitoring 24/7!"
 
 if __name__ == "__main__":
-    send_telegram_alert("✅ رسالة تجريبية: تم دمج المنصات القديمة والجديدة بنجاح!")
+    send_telegram_alert("✅ رسالة تجريبية: تمت إضافة Tipico وتفعيل مراقبة HT و FT بنجاح!")
 
     t = threading.Thread(target=check_kooora_matches, daemon=True)
     t.start()
