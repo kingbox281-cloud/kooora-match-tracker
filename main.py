@@ -16,7 +16,7 @@ def home():
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
-# إعدادات تيليجرام (يتم سحبها من متغيرات البيئة في Render أو ضعها هنا مباشرة)
+# إعدادات تيليجرام
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID')
 
@@ -46,6 +46,24 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"Error sending telegram message: {e}")
         return None
+
+def send_test_alert():
+    current_time = datetime.now().strftime("%H:%M:%S")
+    message = (
+        f"🟢 **[TEST MODE] رسالة تجريبية عند بدء التشغيل والتحديث**\n\n"
+        f"⚽ المباراة: **Real Madrid vs Barcelona (تجريبي)**\n"
+        f"🌍 الدولة / البطولة: **الدوري الإسباني (تجريبي)**\n"
+        f"⏰ وقت التحديث: `{current_time}`\n"
+        f"📌 الحالة الرسمية (كووورة): انتهت المباراة (FT) ✅\n\n"
+        f"⚠️ **المنصات المستهدفة للفحص السريع:**\n"
+    )
+    
+    for bookie in TARGET_BOOKMAKERS:
+        message += f"• {bookie} 🟡\n"
+        
+    message += f"\n⚡ **البوت يعمل الآن وجاهز لمراقبة المباريات الحقيقية بنجاح!**"
+    
+    send_telegram_message(message)
 
 def format_and_send_alert(match_name, league, status_type):
     current_time = datetime.now().strftime("%H:%M:%S")
@@ -85,14 +103,34 @@ def check_kooora_matches():
             return
         
         soup = BeautifulSoup(response.text, 'html.parser')
+        matches = soup.find_all(['div', 'tr'], class_=lambda x: x and ('match' in x or 'game' in x))
         
-        # تحليل مباريات الصفحة والبحث عن الحالات المستهدفة (HT / FT)
-        matches = soup.find_all('div', class_='match')
-        
+        if not matches:
+            matches = soup.find_all('div', text=lambda t: t and ('انتهت' in t or 'الشوط الأول' in t or 'FT' in t))
+
         for match in matches:
-            # استخراج المعرف الفريد للمباراة، اسم الفريقين، البطولة، والحالة
-            # يتم تفعيل الشروط هنا ومقارنتها مع مجموعة sent_alerts لمنع التكرار
-            pass
+            match_text = match.get_text(separator=" ", strip=True)
+            
+            is_ft = 'FT' in match_text or 'انتهت' in match_text or 'نهاية المباراة' in match_text
+            is_ht = 'HT' in match_text or 'الشوط الأول' in match_text
+            
+            if is_ft or is_ht:
+                status_type = "FT" if is_ft else "HT"
+                match_id = hash(match_text[:50])
+                
+                if match_id not in sent_alerts:
+                    match_name = "مباراة رُصدت عبر النظام"
+                    league = "الدوري / البطولة المتاحة"
+                    
+                    lines = [line.strip() for line in match_text.split('\n') if line.strip()]
+                    if len(lines) >= 2:
+                        match_name = f"{lines[0]} vs {lines[1]}"
+                    
+                    format_and_send_alert(match_name, league, status_type)
+                    sent_alerts.add(match_id)
+                    
+                    if len(sent_alerts) > 500:
+                        sent_alerts.clear()
             
     except Exception as e:
         print(f"Error scraping Kooora: {e}")
@@ -100,14 +138,16 @@ def check_kooora_matches():
 def bot_loop():
     while True:
         check_kooora_matches()
-        # فحص الموقع كل 60 ثانية
         time.sleep(60)
 
 if __name__ == "__main__":
-    # تشغيل سيرفر الفلاسك في خلفية مستقلة لإبقاء البوت نشطاً على Render
+    # تشغيل سيرفر الفلاسك في خلفية مستقلة
     t = threading.Thread(target=run_flask)
     t.daemon = True
     t.start()
+    
+    # إرسال رسالة تجريبية فور تشغيل البوت للتأكد من الاتصال
+    send_test_alert()
     
     # بدء حلقة العمل المستمرة للبوت
     bot_loop()
