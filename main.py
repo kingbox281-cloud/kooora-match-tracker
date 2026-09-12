@@ -68,6 +68,10 @@ def format_and_send_alert(match_name, country, league, status_type):
     
     send_telegram_message(message)
 
+# إرسال رسالة تجريبية لمرة واحدة عند تشغيل البوت للتأكد من عمله
+current_time = datetime.now().strftime("%H:%M:%S")
+send_telegram_message(f"🚀 **تم تشغيل بوت مراقبة كووورة بنجاح!**\nالوقت: `{current_time}`\nالبوت يعمل الآن في الخلفية ولن تُرسل رسائل دورية، بل سيتم تنبيهك فور رصد أي مباراة منتهية مباشرة.")
+
 def check_kooora_matches():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -75,9 +79,6 @@ def check_kooora_matches():
     try:
         response = requests.get(KOOORA_URL, headers=headers, timeout=15)
         print(f"Kooora response status: {response.status_code}")
-        
-        current_time = datetime.now().strftime("%H:%M:%S")
-        send_telegram_message(f"🔄 البوت قام بعملية فحص حديثة لموقع كووورة بنجاح في الساعة `{current_time}` وحالة الاتصال: `{response.status_code}`")
         
         if response.status_code != 200:
             return
