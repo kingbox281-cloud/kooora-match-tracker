@@ -45,10 +45,10 @@ def format_and_send_alert(match_name, country, league, status_type):
     
     if status_type == "FT":
         status_text = "انتهت المباراة تماماً (FT) ✅"
-        title = "🚨 تنبيه فجوة تأخير عاجل!"
+        title = "🚨 تنبيه فجوة تأخير عاجل (نهاية المباراة)!"
     else:
-        status_text = "انتهى الشوط الأول ⏸️"
-        title = "🟡 تنبيه فجوة تأخير الشوط الأول!"
+        status_text = "انتهى الشوط الأول (HT) ⏸️"
+        title = "🟡 تنبيه فجوة تأخير (الشوط الأول)!"
         
     message = (
         f"{title}\n\n"
@@ -93,16 +93,23 @@ def check_kooora_matches():
                 if parts:
                     current_league = parts[0][:40]
 
+            # فحص انتهاء المباراة (FT) أو الشوط الأول (HT / الشوط الأول)
+            status_detected = None
             if 'انتهت' in text or 'FT' in text:
-                match_id = hash(text[:80])
+                status_detected = "FT"
+            elif 'الشوط الأول' in text or 'HT' in text:
+                status_detected = "HT"
+
+            if status_detected:
+                match_id = hash(text[:80] + status_detected)
                 if match_id not in sent_alerts:
-                    teams = [t.strip() for t in text.split() if len(t) > 2 and t not in ['انتهت', 'FT', 'المباراة', 'البطولة', 'الدوري']]
+                    teams = [t.strip() for t in text.split() if len(t) > 2 and t not in ['انتهت', 'FT', 'HT', 'الشوط', 'الأول', 'المباراة', 'البطولة', 'الدوري']]
                     if len(teams) >= 2:
                         match_name = f"{teams[0]} vs {teams[1]}"
                     else:
                         match_name = "مباراة مرصودة"
                     
-                    format_and_send_alert(match_name, current_country, current_league, "FT")
+                    format_and_send_alert(match_name, current_country, current_league, status_detected)
                     sent_alerts.add(match_id)
                     
                     if len(sent_alerts) > 500:
@@ -112,9 +119,8 @@ def check_kooora_matches():
         print(f"Error scraping Kooora: {e}")
 
 def bot_loop():
-    # إرسال رسالة تجريبية مرة واحدة عند بدء عمل البوت في الخلفية
     current_time = datetime.now().strftime("%H:%M:%S")
-    send_telegram_message(f"🚀 **تم تشغيل بوت مراقبة كووورة بنجاح!**\nالوقت: `{current_time}`\nالبوت يعمل الآن في الخلفية بصمت ولن تُرسل رسائل دورية، وسيتم تنبيهك فوراً عند رصد أي مباراة منتهية.")
+    send_telegram_message(f"🚀 **تم تشغيل بوت مراقبة كووورة (شامل FT & HT) بنجاح!**\nالوقت: `{current_time}`\nالبوت يراقب الآن نهاية المباراة والشوط الأول بصمت تام.")
     
     while True:
         print("Checking Kooora matches...")
