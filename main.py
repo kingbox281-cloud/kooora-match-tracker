@@ -1,3 +1,73 @@
+import os
+import time
+import threading
+import requests
+from datetime import datetime
+from flask import Flask
+from bs4 import BeautifulSoup
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running and monitoring Kooora 24/7!"
+
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID')
+
+KOOORA_URL = "https://www.kooora.com/default.aspx?g=matches"
+
+TARGET_BOOKMAKERS = [
+    "Tipico", "Tipwin", "Merkur Bets", "sportwetten.de", "NEO.bet", 
+    "bet365", "Winamax", "bwin", "Betano", "Bet-at-home", 
+    "ODDSET", "Interwetten", "DAZN Bet", "AdmiralBet", "Betway", 
+    "LeoVegas", "VBET", "Bet3000"
+]
+
+sent_alerts = set()
+
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"Error sending telegram message: {e}")
+        return None
+
+def format_and_send_alert(match_name, country, league, status_type):
+    current_time = datetime.now().strftime("%H:%M:%S")
+    
+    if status_type == "FT":
+        status_text = "انتهت المباراة تماماً (FT) ✅"
+        title = "🚨 تنبيه فجوة تأخير عاجل!"
+    else:
+        status_text = "انتهى الشوط الأول ⏸️"
+        title = "🟡 تنبيه فجوة تأخير الشوط الأول!"
+        
+    message = (
+        f"{title}\n\n"
+        f"⚽ المباراة: **{match_name}**\n"
+        f"🌍 الدولة: **{country}**\n"
+        f"🏆 البطولة: **{league}**\n"
+        f"⏰ وقت التحديث: `{current_time}`\n"
+        f"🛑 الحالة في المصدر الرسمي (كووورة): {status_text}\n"
+        f"⏳ الحالة في المنصات: **لا تزال معروضة أو لم يتم إيقاف الرهان بعد في المنصات المستهدفة أدناه!**\n\n"
+        f"⚠️ **المنصات للفحص السريع:**\n"
+    )
+    
+    for bookie in TARGET_BOOKMAKERS:
+        message += f"• {bookie} 🟡\n"
+        
+    message += f"\n⚡ **سارع بالتحقق واغتنام الفرصة!**"
+    
+    send_telegram_message(message)
+
 def check_kooora_matches():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -16,29 +86,24 @@ def check_kooora_matches():
         current_league = "الدوري العام"
         current_country = "الدولي / محلي"
         
-        # البحث في جدول المباريات بطريقة دقيقة تلتقط المباريات وحالاتها
-        # موقع كووورة يضع المباريات غالباً داخل عناصر تحتوي على الفرق والحالة
         matches = soup.find_all('tr') or soup.find_all('div', class_='match')
         
         for match in matches:
             text = match.get_text(separator=" ", strip=True)
             
-            # تحديث اسم البطولة إذا وجد في السطر
             if 'الدوري' in text or 'كأس' in text or 'بطولة' in text or 'دوري' in text:
                 parts = [p.strip() for p in text.split('-') if len(p.strip()) > 3]
                 if parts:
                     current_league = parts[0][:40]
 
-            # التحقق مما إذا كانت المباراة قد انتهت
-            if 'انتهت' in text or 'FT' in (match.get('class', []) or []):
+            if 'انتهت' in text or 'FT' in text:
                 match_id = hash(text[:80])
                 if match_id not in sent_alerts:
-                    # محاولة استخراج أسماء الفريقين بشكل نظيف
                     teams = [t.strip() for t in text.split() if len(t) > 2 and t not in ['انتهت', 'FT', 'المباراة', 'البطولة', 'الدوري']]
                     if len(teams) >= 2:
                         match_name = f"{teams[0]} vs {teams[1]}"
                     else:
-                        match_name = "مباراة مرصودة (فريقين)"
+                        match_name = "مباراة مرصودة"
                     
                     format_and_send_alert(match_name, current_country, current_league, "FT")
                     sent_alerts.add(match_id)
@@ -48,3 +113,14 @@ def check_kooora_matches():
                         
     except Exception as e:
         print(f"Error scraping Kooora: {e}")
+
+def bot_loop():
+    while True:
+        print("Checking Kooora matches...")
+        check_kooora_matches()
+        time.sleep(60)
+
+threading.Thread(target=bot_loop, daemon=True).start()
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
