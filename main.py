@@ -50,12 +50,14 @@ def send_telegram_message(message):
 def send_test_alert():
     current_time = datetime.now().strftime("%H:%M:%S")
     message = (
-        f"🟢 **[TEST MODE] رسالة تجريبية عند بدء التشغيل والتحديث**\n\n"
-        f"⚽ المباراة: **Real Madrid vs Barcelona (تجريبي)**\n"
-        f"🌍 الدولة / البطولة: **الدوري الإسباني (تجريبي)**\n"
+        f"🚨 **[TEST MODE] تنبيه فجوة تأخير عاجل!**\n\n"
+        f"⚽ المباراة: **Real Madrid vs Barcelona**\n"
+        f"🌍 الدولة: **إسبانيا**\n"
+        f"🏆 البطولة: **الدوري الإسباني**\n"
         f"⏰ وقت التحديث: `{current_time}`\n"
-        f"📌 الحالة الرسمية (كووورة): انتهت المباراة (FT) ✅\n\n"
-        f"⚠️ **المنصات المستهدفة للفحص السريع:**\n"
+        f"🛑 الحالة في المصدر الرسمي (كووورة): انتهت المباراة تماماً (FT) ✅\n"
+        f"⏳ الحالة في المنصات: **لا تزال معروضة أو لم يتم إيقاف الرهان بعد في المنصات المستهدفة أدناه!**\n\n"
+        f"⚠️ **المنصات للفحص السريع:**\n"
     )
     
     for bookie in TARGET_BOOKMAKERS:
@@ -65,23 +67,25 @@ def send_test_alert():
     
     send_telegram_message(message)
 
-def format_and_send_alert(match_name, league, status_type):
+def format_and_send_alert(match_name, country, league, status_type):
     current_time = datetime.now().strftime("%H:%M:%S")
     
     if status_type == "FT":
-        status_text = "انتهت المباراة (FT) ✅"
-        title = "🚨 تنبيه فرصة انتهاء مباراة (FT)"
+        status_text = "انتهت المباراة تماماً (FT) ✅"
+        title = "🚨 تنبيه فجوة تأخير عاجل!"
     else:
-        status_text = "انتهى الشوط الأول (HT) ⏸️"
-        title = "🟡 تنبيه فرصة انتهاء الشوط الأول (HT)"
+        status_text = "انتهى الشوط الأول ⏸️"
+        title = "🟡 تنبيه فجوة تأخير الشوط الأول!"
         
     message = (
-        f"{title}\n"
+        f"{title}\n\n"
         f"⚽ المباراة: **{match_name}**\n"
-        f"🌍 الدولة / البطولة: **{league}**\n"
+        f"🌍 الدولة: **{country}**\n"
+        f"🏆 البطولة: **{league}**\n"
         f"⏰ وقت التحديث: `{current_time}`\n"
-        f"📌 الحالة الرسمية (كووورة): {status_text}\n\n"
-        f"⚠️ **المنصات المستهدفة للفحص السريع:**\n"
+        f"🛑 الحالة في المصدر الرسمي (كووورة): {status_text}\n"
+        f"⏳ الحالة في المنصات: **لا تزال معروضة أو لم يتم إيقاف الرهان بعد في المنصات المستهدفة أدناه!**\n\n"
+        f"⚠️ **المنصات للفحص السريع:**\n"
     )
     
     for bookie in TARGET_BOOKMAKERS:
@@ -120,13 +124,14 @@ def check_kooora_matches():
                 
                 if match_id not in sent_alerts:
                     match_name = "مباراة رُصدت عبر النظام"
-                    league = "الدوري / البطولة المتاحة"
+                    country = "غير محدد"
+                    league = "البطولة المتاحة"
                     
                     lines = [line.strip() for line in match_text.split('\n') if line.strip()]
                     if len(lines) >= 2:
                         match_name = f"{lines[0]} vs {lines[1]}"
                     
-                    format_and_send_alert(match_name, league, status_type)
+                    format_and_send_alert(match_name, country, league, status_type)
                     sent_alerts.add(match_id)
                     
                     if len(sent_alerts) > 500:
@@ -141,13 +146,10 @@ def bot_loop():
         time.sleep(60)
 
 if __name__ == "__main__":
-    # تشغيل سيرفر الفلاسك في خلفية مستقلة
     t = threading.Thread(target=run_flask)
     t.daemon = True
     t.start()
     
-    # إرسال رسالة تجريبية فور تشغيل البوت للتأكد من الاتصال
     send_test_alert()
     
-    # بدء حلقة العمل المستمرة للبوت
     bot_loop()
