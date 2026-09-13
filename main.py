@@ -27,23 +27,16 @@ def health():
 # TELEGRAM
 # =========================================================
 
-TELEGRAM_BOT_TOKEN = os.environ.get(
-    "TELEGRAM_BOT_TOKEN",
-    "YOUR_BOT_TOKEN"
-)
-
-TELEGRAM_CHAT_ID = os.environ.get(
-    "TELEGRAM_CHAT_ID",
-    "YOUR_CHAT_ID"
-)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 
 def send_telegram_message(message):
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN":
+    if not TELEGRAM_BOT_TOKEN:
         print("Telegram token is not configured.")
         return None
 
-    if not TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID == "YOUR_CHAT_ID":
+    if not TELEGRAM_CHAT_ID:
         print("Telegram chat ID is not configured.")
         return None
 
@@ -51,20 +44,13 @@ def send_telegram_message(message):
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
+        "text": message,
     }
 
     try:
-        response = requests.post(
-            url,
-            json=payload,
-            timeout=15
-        )
-
+        response = requests.post(url, json=payload, timeout=15)
         print("Telegram:", response.status_code)
-
         return response.json()
-
     except Exception as e:
         print(f"Telegram error: {e}")
         return None
@@ -76,9 +62,8 @@ def send_telegram_message(message):
 
 KOOORA_URLS = [
     "https://www.kooora.com/%D9%83%D8%B1%D8%A9-%D8%A7%D9%84%D9%82%D8%AF%D9%85/%D9%85%D8%A8%D8%A7%D8%B1%D9%8A%D8%A7%D8%AA-%D8%A7%D9%84%D9%8A%D9%88%D9%85",
-    "https://www.kooora.com/default.aspx?g=matches"
+    "https://www.kooora.com/default.aspx?g=matches",
 ]
-
 
 KOOORA_HEADERS = {
     "User-Agent": (
@@ -86,7 +71,7 @@ KOOORA_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "ar,en;q=0.8"
+    "Accept-Language": "ar,en;q=0.8",
 }
 
 
@@ -112,31 +97,31 @@ TARGET_BOOKMAKERS = [
     "Betway",
     "LeoVegas",
     "VBET",
-    "Bet3000"
+    "Bet3000",
 ]
-
 
 # صفحات عامة فقط.
 # لا يوجد تسجيل دخول ولا تجاوز CAPTCHA.
+
 BOOKMAKER_URLS = {
     "Tipico": "https://www.tipico.de/",
     "Tipwin": "https://www.tipwin.de/",
     "Merkur Bets": "https://www.merkurbets.de/",
     "sportwetten.de": "https://www.sportwetten.de/",
     "NEO.bet": "https://www.neo.bet/",
-    "bet365": "https://www.bet365.com/",
+    "bet365": "https://www.bet365.de/hub/de-de/football",
     "Winamax": "https://www.winamax.de/",
     "bwin": "https://www.bwin.de/",
     "Betano": "https://www.betano.de/",
     "Bet-at-home": "https://www.bet-at-home.com/",
     "ODDSET": "https://www.oddset.de/",
-    "Interwetten": "https://www.interwetten.com/",
+    "Interwetten": "https://www.interwetten.de/de/sportwetten",
     "DAZN Bet": "https://www.daznbet.de/",
     "AdmiralBet": "https://www.admiralbet.de/",
     "Betway": "https://betway.de/",
-    "LeoVegas": "https://www.leovegas.com/",
+    "LeoVegas": "https://www.leovegas.de/de-de/sportwetten#featured",
     "VBET": "https://www.vbet.de/",
-    "Bet3000": "https://www.bet3000.com/"
+    "Bet3000": "https://bet3000.de/home",
 }
 
 
@@ -154,7 +139,7 @@ CAPTCHA_WORDS = [
     "security check",
     "bot detection",
     "access denied",
-    "cloudflare"
+    "cloudflare",
 ]
 
 
@@ -195,7 +180,9 @@ def check_bookmaker_access(bookmaker):
     - بتنفيذ رهانات
     - بالتحايل على حماية الموقع
 
-    النتيجة لا تعني أن السوق ما زال مفتوحاً.
+    مهم:
+    ACCESSIBLE تعني أن الصفحة العامة أمكن الوصول إليها فقط.
+    لا تعني أن مباراة معينة أو سوقاً معيناً ما زال مفتوحاً.
     """
 
     url = BOOKMAKER_URLS.get(bookmaker)
@@ -209,16 +196,15 @@ def check_bookmaker_access(bookmaker):
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ),
-        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8"
+        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
     }
 
     try:
-
         response = requests.get(
             url,
             headers=headers,
             timeout=10,
-            allow_redirects=True
+            allow_redirects=True,
         )
 
         print(
@@ -226,11 +212,9 @@ def check_bookmaker_access(bookmaker):
             f"{response.url}"
         )
 
-        # CAPTCHA / حماية البوت
         if detect_captcha(response):
             return "CAPTCHA"
 
-        # حالات منع الوصول
         if response.status_code in [401, 403, 429]:
             return "BLOCKED"
 
@@ -256,20 +240,14 @@ def check_bookmaker_access(bookmaker):
 
 
 def check_all_bookmakers():
-
     results = {}
 
     for bookmaker in TARGET_BOOKMAKERS:
-
         status = check_bookmaker_access(bookmaker)
-
         results[bookmaker] = status
 
-        # إذا وجد CAPTCHA، ننتقل مباشرة للمنصة التالية
         if status == "CAPTCHA":
-            print(
-                f"🚫 {bookmaker}: CAPTCHA detected - skipped"
-            )
+            print(f"🚫 {bookmaker}: CAPTCHA detected - skipped")
 
         time.sleep(0.5)
 
@@ -281,7 +259,6 @@ def check_all_bookmakers():
 # =========================================================
 
 def bookmaker_status_icon(status):
-
     if status == "ACCESSIBLE":
         return "🟢 يمكن الوصول للصفحة"
 
@@ -310,38 +287,17 @@ def bookmaker_status_icon(status):
 sent_alerts = set()
 
 
-def format_and_send_alert(
-    match_name,
-    country,
-    league,
-    status_type
-):
-
+def format_and_send_alert(match_name, country, league, status_type):
     current_time = datetime.now().strftime("%H:%M:%S")
 
     if status_type == "FT":
-
-        status_text = (
-            "انتهت المباراة تماماً (FT) ✅"
-        )
-
-        title = (
-            "🚨 تنبيه: نهاية المباراة على كووورة"
-        )
-
+        status_text = "انتهت المباراة تماماً (FT) ✅"
+        title = "🚨 تنبيه: نهاية المباراة على كووورة"
     else:
+        status_text = "انتهى الشوط الأول (HT) ⏸️"
+        title = "🟡 تنبيه: نهاية الشوط الأول على كووورة"
 
-        status_text = (
-            "انتهى الشوط الأول (HT) ⏸️"
-        )
-
-        title = (
-            "🟡 تنبيه: نهاية الشوط الأول على كووورة"
-        )
-
-    print(
-        f"Checking bookmakers for: {match_name}"
-    )
+    print(f"Checking bookmakers for: {match_name}")
 
     bookmaker_results = check_all_bookmakers()
 
@@ -354,7 +310,7 @@ def format_and_send_alert(
         f"🛑 حالة كووورة:\n"
         f"{status_text}\n\n"
         f"📊 حالة الوصول إلى المنصات:\n"
-        f"(الوصول للصفحة لا يعني أن الرهان ما زال مفتوحاً)\n\n"
+        f"(الوصول للصفحة لا يعني أن الرهان أو المباراة ما زال مفتوحاً)\n\n"
     )
 
     accessible = 0
@@ -363,27 +319,17 @@ def format_and_send_alert(
     other = 0
 
     for bookmaker in TARGET_BOOKMAKERS:
-
-        status = bookmaker_results.get(
-            bookmaker,
-            "NOT_CHECKED"
-        )
-
+        status = bookmaker_results.get(bookmaker, "NOT_CHECKED")
         icon = bookmaker_status_icon(status)
 
-        message += (
-            f"• {bookmaker}: {icon}\n"
-        )
+        message += f"• {bookmaker}: {icon}\n"
 
         if status == "ACCESSIBLE":
             accessible += 1
-
         elif status == "CAPTCHA":
             captcha += 1
-
         elif status == "BLOCKED":
             blocked += 1
-
         else:
             other += 1
 
@@ -394,10 +340,9 @@ def format_and_send_alert(
         f"🚫 CAPTCHA: {captcha}\n"
         f"🔴 محظورة: {blocked}\n"
         f"⚪ أخرى/غير متحقق: {other}\n\n"
-        "ℹ️ المنصات التي يظهر فيها CAPTCHA "
-        "تم استبعادها تلقائياً من الفحص.\n"
-        "ℹ️ لا يتم تجاوز CAPTCHA أو تسجيل الدخول "
-        "أو تنفيذ أي رهان تلقائياً."
+        "ℹ️ المنصات التي يظهر فيها CAPTCHA تم استبعادها تلقائياً.\n"
+        "ℹ️ لا يتم تجاوز CAPTCHA أو تسجيل الدخول أو تنفيذ أي رهان تلقائياً.\n"
+        "ℹ️ يرجى التحقق يدوياً من حالة المباراة والسوق داخل المنصة."
     )
 
     send_telegram_message(message)
@@ -408,15 +353,12 @@ def format_and_send_alert(
 # =========================================================
 
 def get_kooora_page():
-
     for url in KOOORA_URLS:
-
         try:
-
             response = requests.get(
                 url,
                 headers=KOOORA_HEADERS,
-                timeout=20
+                timeout=20,
             )
 
             print(
@@ -425,21 +367,19 @@ def get_kooora_page():
             )
 
             if response.status_code == 200:
-
                 return response
 
         except Exception as e:
-
-            print(
-                f"Kooora connection error: {e}"
-            )
+            print(f"Kooora connection error: {e}")
 
     return None
 
 
 def extract_match_name(text):
+    """
+    استخراج تقريبي لاسم المباراة من النص.
+    """
 
-    # إزالة بعض الكلمات غير المفيدة
     ignored = {
         "انتهت",
         "FT",
@@ -449,15 +389,15 @@ def extract_match_name(text):
         "المباراة",
         "البطولة",
         "الدوري",
+        "دوري",
         "كأس",
-        "بطولة"
+        "بطولة",
     }
 
     words = []
 
     for word in text.split():
-
-        clean = word.strip()
+        clean = word.strip(" -–—|:")
 
         if len(clean) < 2:
             continue
@@ -465,100 +405,65 @@ def extract_match_name(text):
         if clean in ignored:
             continue
 
-        # تجاهل بعض الأرقام
         if clean.isdigit():
             continue
 
         words.append(clean)
 
     if len(words) >= 2:
-
-        return (
-            f"{words[0]} vs {words[1]}"
-        )
+        return f"{words[0]} vs {words[1]}"
 
     return "مباراة مرصودة"
 
 
 def detect_status(text):
-
     upper_text = text.upper()
 
-    # FT
-    if (
-        "انتهت" in text
-        or "FT" in upper_text
-    ):
+    if "انتهت" in text or "FT" in upper_text:
         return "FT"
 
-    # HT
-    if (
-        "الشوط الأول" in text
-        or "HT" in upper_text
-    ):
+    if "الشوط الأول" in text or "HT" in upper_text:
         return "HT"
 
     return None
 
 
 def check_kooora_matches():
-
     response = get_kooora_page()
 
     if response is None:
-
-        print(
-            "❌ Unable to access Kooora"
-        )
-
+        print("❌ Unable to access Kooora")
         return
 
     try:
-
-        soup = BeautifulSoup(
-            response.text,
-            "html.parser"
-        )
+        soup = BeautifulSoup(response.text, "html.parser")
 
         current_league = "الدوري العام"
         current_country = "الدولي / محلي"
 
-        # محاولة قراءة الصفوف
         matches = soup.find_all("tr")
 
-        # إذا لم نجد tr، نجرب عناصر match
         if not matches:
+            matches = soup.find_all("div", class_="match")
 
-            matches = soup.find_all(
-                "div",
-                class_="match"
-            )
-
-        print(
-            f"Kooora elements found: {len(matches)}"
-        )
+        print(f"Kooora elements found: {len(matches)}")
 
         for match in matches:
-
             text = match.get_text(
                 separator=" ",
-                strip=True
+                strip=True,
             )
 
             if not text:
                 continue
 
-            # -----------------------------------------
             # البطولة
-            # -----------------------------------------
-
             if (
                 "الدوري" in text
                 or "دوري" in text
                 or "كأس" in text
                 or "بطولة" in text
             ):
-
                 parts = [
                     p.strip()
                     for p in text.split("-")
@@ -566,30 +471,18 @@ def check_kooora_matches():
                 ]
 
                 if parts:
+                    current_league = parts[0][:60]
 
-                    current_league = (
-                        parts[0][:60]
-                    )
-
-            # -----------------------------------------
             # الحالة
-            # -----------------------------------------
-
             status_detected = detect_status(text)
 
             if not status_detected:
                 continue
 
-            # -----------------------------------------
             # اسم المباراة
-            # -----------------------------------------
-
             match_name = extract_match_name(text)
 
-            # -----------------------------------------
-            # ID ثابت قدر الإمكان
-            # -----------------------------------------
-
+            # ID
             match_id = (
                 f"{match_name}|"
                 f"{current_league}|"
@@ -605,27 +498,20 @@ def check_kooora_matches():
                 f"{status_detected}"
             )
 
-            # إرسال التنبيه
             format_and_send_alert(
                 match_name,
                 current_country,
                 current_league,
-                status_detected
+                status_detected,
             )
 
             sent_alerts.add(match_id)
 
-            # منع نمو الذاكرة بلا حدود
             if len(sent_alerts) > 1000:
-
-                # الاحتفاظ بآخر جزء فقط
                 sent_alerts.clear()
 
     except Exception as e:
-
-        print(
-            f"❌ Error scraping Kooora: {e}"
-        )
+        print(f"❌ Error scraping Kooora: {e}")
 
 
 # =========================================================
@@ -633,51 +519,29 @@ def check_kooora_matches():
 # =========================================================
 
 def bot_loop():
-
-    current_time = datetime.now().strftime(
-        "%H:%M:%S"
-    )
+    current_time = datetime.now().strftime("%H:%M:%S")
 
     startup_message = (
         "🚀 تم تشغيل بوت مراقبة كووورة بنجاح!\n\n"
         f"⏰ الوقت: {current_time}\n"
         "⚽ مراقبة FT و HT\n"
-        "📊 فحص المنصات العامة\n"
+        "📊 فحص 18 منصة عامة\n"
         "🚫 استبعاد CAPTCHA تلقائياً\n"
         "🔄 الفحص كل 60 ثانية"
     )
 
-    send_telegram_message(
-        startup_message
-    )
+    send_telegram_message(startup_message)
 
     while True:
-
         try:
-
-            print(
-                "\n=============================="
-            )
-
-            print(
-                "Checking Kooora..."
-            )
-
+            print("\n==============================")
+            print("Checking Kooora...")
             check_kooora_matches()
-
-            print(
-                "Next check in 60 seconds..."
-            )
-
-            print(
-                "==============================\n"
-            )
+            print("Next check in 60 seconds...")
+            print("==============================\n")
 
         except Exception as e:
-
-            print(
-                f"Bot loop error: {e}"
-            )
+            print(f"Bot loop error: {e}")
 
         time.sleep(60)
 
@@ -688,24 +552,18 @@ def bot_loop():
 
 bot_thread = threading.Thread(
     target=bot_loop,
-    daemon=True
+    daemon=True,
 )
 
 bot_thread.start()
 
 
 if __name__ == "__main__":
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            "8080"
-        )
-    )
+    port = int(os.environ.get("PORT", "8080"))
 
     app.run(
         host="0.0.0.0",
         port=port,
         debug=False,
-        use_reloader=False
+        use_reloader=False,
     )
