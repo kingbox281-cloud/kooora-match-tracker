@@ -67,13 +67,30 @@ def send_telegram_alert(country, league_name, match_name, match_score, kooora_st
 def fetch_kooora_matches_today():
     """
     دالة جلب وتجميع المباريات الحقيقية من كووورة والمنصات.
+    يجب أن تعيد هذه الدالة قائمة من القواميس (List of Dicts) بالهيكل التالي:
+    [
+       {
+           "country": "اسم الدولة",
+           "league": "اسم البطولة/الدوري",
+           "name": "اسم الفريقين (مثلاً: بايرن ميونخ vs دورتموند)",
+           "score": "النتيجة النهائية (مثلاً: 3 - 1)",
+           "status": "حالة المباراة الحقيقية من كووورة (مثل FT)",
+           "platforms_status": {
+               "Merkur Bets": "Pre-match أو Closed",
+               ... وباقي المنصات الـ 18
+           }
+       }
+    ]
     """
     matches_list = []
+    
     try:
-        # --- [ضع كود السحب الحقيقي الخاص بك هنا] ---
+        # --- [ضع كود السحب الحقيقي الخاص بك هنا لجلب المباريات والنتائج وحالة المنصات] ---
         pass
+        
     except Exception as e:
         print(f"⚠️ خطأ أثناء جلب البيانات من الموقع: {e}")
+        
     return matches_list
 
 def run_arbitrage_bot():
@@ -83,6 +100,8 @@ def run_arbitrage_bot():
     while True:
         try:
             print("🔄 جاري فحص مباريات اليوم وتحديث الحالة...")
+            
+            # 1. جلب قائمة مباريات اليوم الحقيقية
             matches = fetch_kooora_matches_today()
             
             for match in matches:
@@ -93,29 +112,34 @@ def run_arbitrage_bot():
                 status = match.get("status")
                 platforms_data = match.get("platforms_status", {})
                 
+                # 2. التحقق مما إذا كانت المباراة قد انتهت فعلاً على كووورة
                 if status in ["FT", "انتهت", "Ended"]:
                     delayed_platforms = []
+                    
+                    # 3. الفحص على المنصات الـ 18 الحقيقية
                     for platform in LIST_OF_18_PLATFORMS:
                         p_status = platforms_data.get(platform, "Closed")
                         if p_status == "Pre-match":
                             delayed_platforms.append(platform)
                     
+                    # 4. إذا وجدت منصات متأخرة حقيقية، أرسل تنبيه فوري
                     if len(delayed_platforms) > 0:
                         print(f"🚨 تم رصد ثغرة للمباراة: {match_name} ({match_score}) - {league}")
                         send_telegram_alert(country, league, match_name, match_score, status, delayed_platforms)
                 
+            # الانتظار لدقيقة واحدة قبل الدورة التالية لتجنب الحظر
             time.sleep(60)
             
         except Exception as e:
             print(f"⚠️ حدث خطأ في الحلقة الرئيسية: {e}")
             time.sleep(30)
 
-# نقطة بداية التشغيل وتنزيل البوت في خلفية خادم الويب
+# ==================== نقطة بداية التشغيل ====================
 if __name__ == "__main__":
-    # تشغيل البوت في خيط منفصل (Background Thread) لكي لا يعطل سيرفر الويب
+    # تشغيل البوت في خيط خلفي (Background Thread)
     bot_thread = threading.Thread(target=run_arbitrage_bot, daemon=True)
     bot_thread.start()
     
-    # تشغيل سيرفر الويب ليجيب على متطلبات Render
+    # تشغيل خادم الويب ليناسب استضافة Render
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
