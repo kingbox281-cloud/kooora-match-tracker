@@ -11,6 +11,15 @@ app = Flask(__name__)
 def home():
     return "Kooora Arbitrage Bot is running successfully! 🚀"
 
+@app.route("/test-telegram")
+def test_telegram_route():
+    """مسار (Route) تجريبي: بمجرد فتح رابط موقعك المرفوع على Render متبوعاً بـ /test-telegram ستصلك رسالة تجريبية فوراً"""
+    result = send_test_message()
+    if result:
+        return "✅ تم إرسال الرسالة التجريبية بنجاح إلى تيليجرام!"
+    else:
+        return "❌ فشل إرسال الرسالة، تحقق من التوكن والآيدي."
+
 # ==================== إعدادات الإتصال ====================
 TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"
@@ -65,46 +74,41 @@ def send_telegram_alert(country, league_name, match_name, match_score, kooora_st
         print(f"❌ خطأ في إرسال التنبيه عبر تيليجرام: {e}")
 
 def send_test_message():
-    """إرسال رسالة تجريبية فورية للتأكد من ربط التيليجرام بنجاح"""
+    """دالة إرسال رسالة تجريبية فورية إلى تيليجرام"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": "🤖 *تم تشغيل بوت مراقبة فجوات كووورة بنجاح والاتصال يعمل تماماً!*",
-        "parse_mode": "Markdown"
+        "text": "🧪 *هذه رسالة تجريبية من بوت مراقبة فجوات كووورة للاطمئنان على الاتصال!*",
+        "parse_Mode": "Markdown"
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, timeout=10)
         print("✅ تم إرسال رسالة الاختبار بنجاح إلى تيليجرام.")
+        return response.json()
     except Exception as e:
         print(f"❌ فشل إرسال رسالة الاختبار: {e}")
+        return None
 
 def fetch_kooora_matches_today():
-    """
-    دالة جلب وتجميع المباريات الحقيقية من كووورة والمنصات.
-    """
+    """دالة جلب المباريات من كووورة (قيد الإعداد)"""
     matches_list = []
-    
     try:
-        # --- [ضع كود السحب الحقيقي الخاص بك هنا لجلب المباريات والنتائج وحالة المنصات] ---
+        # --- [ضع كود السحب هنا لاحقاً] ---
         pass
-        
     except Exception as e:
-        print(f"⚠️ خطأ أثناء جلب البيانات من الموقع: {e}")
-        
+        print(f"⚠️ خطأ أثناء جلب البيانات: {e}")
     return matches_list
 
 def run_arbitrage_bot():
-    """حلقة العمل الرئيسية التي تعمل بلا توقف 24/7 لمراقبة السوق"""
+    """حلقة العمل الرئيسية للمراقبة 24/7"""
     print("🤖 بدأ تشغيل بوت مراقبة فجوات كووورة بنجاح...")
     
-    # إرسال رسالة تجريبية عند الإقلاع للتأكد من التيليجرام
+    # إرسال رسالة تجريبية عند الإقلاع
     send_test_message()
     
     while True:
         try:
             print("🔄 جاري فحص مباريات اليوم وتحديث الحالة...")
-            
-            # 1. جلب قائمة مباريات اليوم الحقيقية
             matches = fetch_kooora_matches_today()
             
             for match in matches:
@@ -115,22 +119,17 @@ def run_arbitrage_bot():
                 status = match.get("status")
                 platforms_data = match.get("platforms_status", {})
                 
-                # 2. التحقق مما إذا كانت المباراة قد انتهت فعلاً على كووورة
                 if status in ["FT", "انتهت", "Ended"]:
                     delayed_platforms = []
-                    
-                    # 3. الفحص على المنصات الـ 18 الحقيقية
                     for platform in LIST_OF_18_PLATFORMS:
                         p_status = platforms_data.get(platform, "Closed")
                         if p_status == "Pre-match":
                             delayed_platforms.append(platform)
                     
-                    # 4. إذا وجدت منصات متأخرة حقيقية، أرسل تنبيه فوري
                     if len(delayed_platforms) > 0:
                         print(f"🚨 تم رصد ثغرة للمباراة: {match_name} ({match_score}) - {league}")
                         send_telegram_alert(country, league, match_name, match_score, status, delayed_platforms)
                 
-            # الانتظار لدقيقة واحدة قبل الدورة التالية لتجنب الحظر
             time.sleep(60)
             
         except Exception as e:
@@ -139,10 +138,8 @@ def run_arbitrage_bot():
 
 # ==================== نقطة بداية التشغيل ====================
 if __name__ == "__main__":
-    # تشغيل البوت في خيط خلفي (Background Thread)
     bot_thread = threading.Thread(target=run_arbitrage_bot, daemon=True)
     bot_thread.start()
     
-    # تشغيل خادم الويب ليناسب استضافة Render
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
