@@ -101,6 +101,7 @@ def check_all_bookmakers():
         results[bookmaker] = check_bookmaker_access(bookmaker)
     return results
 
+# ذاكرة قوية لمنع التكرار نهائياً
 sent_matches_cache = set()
 
 def check_kooora_matches():
@@ -110,42 +111,45 @@ def check_kooora_matches():
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
                 
-                # البحث في جدول المباريات الخاص بكووورة
-                match_rows = soup.find_all(["tr", "li", "div"], class_=lambda x: x and ('match' in x or 'fi' in x))
-                if not match_rows:
-                    match_rows = soup.find_all("tr")
+                # استهداف الصفوف التي تحتوي على نتائج مباريات فقط
+                rows = soup.find_all(["tr", "div"], class_=lambda x: x and ('match' in x or 'fi' in x or 'game' in x))
+                if not rows:
+                    rows = soup.find_all("tr")
 
-                for row in match_rows:
-                    text = row.get_text(separator=" | ", strip=True)
-                    if not text or len(text) < 10:
+                for row in rows:
+                    text = row.get_text(separator=" ", strip=True)
+                    if not text or len(text) < 15:
                         continue
 
                     upper_text = text.upper()
                     
-                    # التحقق مما إذا كانت المباراة قد انتهت
-                    if "انتهت" in text or "FT" in upper_text or "مؤجلة" in text:
-                        parts = [p.strip() for p in text.split("|") if len(p.strip()) > 1]
+                    # التحقق الصارم من حالة انتهاء المباراة
+                    if "انتهت" in text or "FT" in upper_text:
+                        clean_text = re.sub(r'\s+', ' ', text)
                         
-                        # تصفية الكلمات الزائدة
-                        filtered_parts = [p for p in parts if p not in ["انتهت", "FT", "-", "وقت اضافي", "ركلات ترجيح"]]
-                        if len(filtered_parts) < 2:
+                        # استبعاد الأسطر العامة التي لا تمثل مباريات حقيقية
+                        if "الدوري" in clean_text and len(clean_text.split()) < 5:
                             continue
 
-                        # استخراج اسم الفريقين والنتيجة بطريقة منظمة
-                        match_name = f"{filtered_parts[0]} vs {filtered_parts[1]}"
-                        
-                        # البحث عن النتيجة (أرقام مفصولة بشرطة أو مسافة)
-                        score_detected = "غير متوفرة"
-                        for p in filtered_parts:
-                            if re.match(r'^\d+\s*[-–]\s*\d+$', p):
-                                score_detected = p
-                                break
+                        # البحث عن النتيجة النهائية
+                        score_match = re.search(r'(\d+\s*-\s*\d+)', clean_text)
+                        score_detected = score_match.group(1) if score_match else "غير متوفرة"
 
-                        # مفتاح فريد لمنع تكرار الإرسال نهائياً لنفس المباراة
-                        match_key = f"{filtered_parts[0]}-{filtered_parts[1]}"
+                        # استخراج الكلمات الأساسية لتشكيل اسم المباراة
+                        words = [w for w in clean_text.split() if w not in ["انتهت", "FT", "-", "وقت", "اضافي", "ركلات", "ترجيح", score_detected]]
+                        if len(words) < 4:
+                            continue
+
+                        team1 = words[0]
+                        team2 = words[1] if len(words) > 1 else "فريق2"
+                        match_name = f"{team1} vs {team2}"
+
+                        # بناء بصمة فريدة وثابتة للمباراة لمنع تكرارها للأبد
+                        match_fingerprint = f"{team1}_{team2}".lower()
                         
-                        if match_key not in sent_matches_cache:
-                            sent_matches_cache.add(match_key)
+                        if match_fingerprint not in sent_matches_cache:
+                            # حفر البصمة في الذاكرة فوراً قبل فحص المنصات
+                            sent_matches_cache.add(match_fingerprint)
                             
                             bookmaker_results = check_all_bookmakers()
                             
@@ -173,13 +177,14 @@ def check_kooora_matches():
             pass
 
 def bot_loop():
-    send_telegram_message("🚀 تم تحديث البوت لتنقية الأسماء والنتائج ومنع التكرار بنجاح!")
+    send_telegram_message("🚀 تم تطبيق القفل النهائي لمنع التكرار بنجاح!")
     while True:
         try:
             check_kooora_matches()
         except Exception:
             pass
-        time.sleep(40) # زيادة المهلة إلى 40 ثانية لتوفير الأداء المريح
+        # تباعد زمني أطول (دقيقتين) لضمان الاستقرار التام وتجنب الإزعاج
+        time.sleep(120)
 
 bot_thread = threading.Thread(target=bot_loop, daemon=True)
 bot_thread.start()
