@@ -110,37 +110,58 @@ def check_kooora_matches():
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
                 
-                match_blocks = soup.find_all(["tr", "div", "li"], class_=lambda x: x and ('match' in x or 'fi' in x or 'game' in x))
-                if not match_blocks:
-                    match_blocks = soup.find_all("tr")
+                # البحث عن الحاويات التي تُمثل مباريات فعلية في كووورة
+                match_rows = soup.find_all(["tr", "div"], class_=lambda x: x and ('match' in x or 'game' in x or 'fi-row' in x))
+                if not match_rows:
+                    match_rows = soup.find_all("tr")
 
-                for block in match_blocks:
-                    text = block.get_text(separator=" | ", strip=True)
-                    if not text or len(text) < 15:
+                for row in match_rows:
+                    text = row.get_text(separator=" | ", strip=True)
+                    if not text or len(text) < 10:
                         continue
 
                     upper_text = text.upper()
                     
+                    # يجب أن تكون المباراة منتهية فعلياً
                     if "انتهت" in text or "FT" in upper_text:
                         parts = [p.strip() for p in text.split("|") if len(p.strip()) > 1]
                         
-                        cleaned = [p for p in parts if p not in ["انتهت", "FT", "-", "وقت اضافي", "ركلات ترجيح", "المباراة"]]
-                        if len(cleaned) < 2:
-                            continue
+                        # استبعاد الكلمات الترويجية أو العناوين العامة
+                        ignore_words = [
+                            "انتهت", "FT", "-", "وقت اضافي", "ركلات ترجيح", "المباراة", 
+                            "الدوري", "كأس", "بطولة", "المجموعة", "الجولة", "الاسبوع",
+                            "دوري أبطال", "تصفيات", "ودية", "دولي"
+                        ]
+                        
+                        cleaned_parts = []
+                        for p in parts:
+                            # تجاهل أي جزء يحتوي على كلمات عامة أو أسماء بطولات
+                            if any(w in p for w in ignore_words):
+                                continue
+                            if len(p) < 3:
+                                continue
+                            cleaned_parts.append(p)
 
+                        # البحث عن النتيجة النهائية
+                        score_match = re.search(r'(\d+\s*[-–]\s*\d+)', text)
+                        score_detected = score_match.group(1) if score_match else "غير متوفرة"
+
+                        # لضمان أننا امام فريقين حقيقيين، يجب ألا تقل الأجزاء النقية عن فريقين واضحين
                         team1 = ""
                         team2 = ""
-                        score_detected = "غير متوفرة"
-
-                        for p in cleaned:
-                            if re.match(r'^\d+\s*[-–]\s*\d+$', p):
-                                score_detected = p
-                            elif not team1 and len(p) > 2 and "الدوري" not in p and "كأس" not in p and "الجولة" not in p:
+                        
+                        for p in cleaned_parts:
+                            if not team1:
                                 team1 = p
-                            elif team1 and not team2 and len(p) > 2 and "الدوري" not in p and "كأس" not in p and "الجولة" not in p:
+                            elif not team2 and p != team1:
                                 team2 = p
+                                break
 
+                        # فلترة صارمة لمنع التقاط أسماء منتخبات متطابقة أو كلمات مكررة (مثل هيبار vs HEB)
                         if not team1 or not team2:
+                            continue
+                        
+                        if team1.lower() in team2.lower() or team2.lower() in team1.lower():
                             continue
 
                         match_name = f"{team1} vs {team2}"
@@ -152,7 +173,7 @@ def check_kooora_matches():
                             bookmaker_results = check_all_bookmakers()
                             
                             message = (
-                                f"🚨 *رصد فجوة تطابق (انتهت vs لم تبدأ)!* 🚨\n\n"
+                                f"🚨 *رصد فجوة تطابق حقيقية (انتهت vs لم تبدأ)!* 🚨\n\n"
                                 f"⚽ المباراة: {match_name}\n"
                                 f"🛑 الحالة على كووورة: انتهت المباراة (FT)\n"
                                 f"🎯 *النتيجة النهائية: ( {score_detected} )*\n"
@@ -175,7 +196,7 @@ def check_kooora_matches():
             pass
 
 def bot_loop():
-    send_telegram_message("🚀 تم تصحيح الكود وإعادة تشغيل البوت بنجاح!")
+    send_telegram_message("🛡️ تم تفعيل الفلترة المتقدمة لمنع التقاط أسماء البطولات والفرق الوهمية!")
     while True:
         try:
             check_kooora_matches()
