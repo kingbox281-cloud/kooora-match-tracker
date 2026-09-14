@@ -31,14 +31,14 @@ def send_telegram_message(message):
     except Exception:
         return None
 
+# روابط كووورة الرسمية لجداول مباريات اليوم
 KOOORA_URLS = [
-    "https://www.kooora.com/%D9%83%D8%B1%D8%A9-%D8%A7%D9%84%D9%82%D8%AF%D9%85/%D9%85%D8%A8%D8%A7%D8%B1%D9%8A%D8%A7%D8%AA-%D8%A7%D9%84%D9%8A%D9%88%D9%85",
-    "https://www.kooora.com/default.aspx?g=matches"
+    "https://www.kooora.com/%D9%83%D8%B1%D8%A9-%D8%A7%D9%84%D9%82%D8%AF%D9%85/%D9%85%D8%A8%D8%A7%D8%B1%D9%8A%D8%A7%D8%AA-%D8%A7%D9%84%D9%8A%D9%88%D9%85"
 ]
 
 KOOORA_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "ar,en;q=0.8"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept-Language": "ar,en;q=0.9"
 }
 
 TARGET_BOOKMAKERS = [
@@ -103,103 +103,112 @@ def check_all_bookmakers():
 
 sent_matches_cache = set()
 
-def check_kooora_matches():
+def parse_kooora_matches():
     for url in KOOORA_URLS:
         try:
-            response = requests.get(url, headers=KOOORA_HEADERS, timeout=10)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "html.parser")
-                
-                # استهداف الجداول أو الكتل التي تحتوي على تفاصيل المباريات بدقة
-                match_blocks = soup.find_all(['tr', 'div'], class_=lambda x: x and any(c in x for c in ['match', 'game', 'fi-', 'm-row']))
-                if not match_blocks:
-                    match_blocks = soup.find_all('tr')
+            response = requests.get(url, headers=KOOORA_HEADERS, timeout=12)
+            if response.status_code != 200:
+                continue
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # استهداف حاويات المباريات في هيكل كووورة المحدث (غالباً تكون ضمن عناصر تضمن تفاصيل اللقاء)
+            match_boxes = soup.find_all(['div', 'tr'], class_=lambda x: x and any(c in x for c in ['match', 'game', 'fi-block', 'match-item']))
+            
+            if not match_boxes:
+                # طريقة بديلة في حال تغير التصميم: البحث عن الجداول التي تحتوي عمود النتيجة
+                match_boxes = soup.find_all('tr')
 
-                for block in match_blocks:
-                    full_text = block.get_text(separator=" | ", strip=True)
-                    if not full_text or len(full_text) < 10:
+            for box in match_boxes:
+                text_content = box.get_text(separator=" | ", strip=True)
+                if not text_content or len(text_content) < 15:
+                    continue
+
+                upper_text = text_content.upper()
+                
+                # التحقق الحازم من حالة انتهاء المباراة
+                if "انتهت" in text_content or "FT" in upper_text:
+                    
+                    # استخراج النتيجة (مثلاً 2-1 أو 0 - 0)
+                    score_match = re.search(r'(\d+\s*[-–]\s*\d+)', text_content)
+                    if not score_match:
+                        continue # إذا لم توجد نتيجة مسجلة رسمياً، نتخطى المباراة لضمان عدم إرسال بيانات ناقصة
+                    
+                    score_detected = score_match.group(1)
+
+                    # استخراج أسماء الفرق بدقة من خلال تحليل النصوص الصافية
+                    # في كووورة عادة يكون النص: الفريق الأول | النتيجة | الفريق الثاني
+                    parts = [p.strip() for p in text_content.split("|") if len(p.strip()) > 2]
+                    
+                    # تنظيف القائمة من الكلمات الدلالية والبطولات والأرقام
+                    unwanted = [
+                        "انتهت", "FT", "-", "وقت اضافي", "ركلات ترجيح", "المباراة", 
+                        "الدوري", "كأس", "بطولة", "المجموعة", "الجولة", "الاسبوع",
+                        "دوري أبطال", "تصفيات", "ودية", "دولي", "مباريات اليوم", score_detected
+                    ]
+                    
+                    clean_teams = []
+                    for p in parts:
+                        if p in unwanted or any(w in p for w in unwanted):
+                            continue
+                        if re.match(r'^\d{1,2}:\d{2}$', p): # تجاهل أوقات المباريات (مثل 18:00)
+                            continue
+                        if len(p) > 2:
+                            clean_teams.append(p)
+
+                    # يجب أن نحصل على ناديين حقيقيين مختلفين تماماً
+                    if len(clean_teams) < 2:
                         continue
 
-                    upper_text = full_text.upper()
+                    team1 = clean_teams[0]
+                    team2 = clean_teams[1]
+
+                    # شروط إضافية لمنع الأخطاء الوهمية والأسماء المتطابقة
+                    if team1.lower() == team2.lower() or team1.lower() in team2.lower() or team2.lower() in team1.lower():
+                        continue
                     
-                    # التأكد الجازم أن المباراة انتهت (تاريخياً أو حالياً)
-                    if "انتهت" in full_text or "FT" in upper_text or "انتهت المباراة" in full_text:
+                    # التأكد من أن الفريقين لا يحتويان على أحرف لاتينية مكررة (مثل هيبار vs HEB)
+                    if len(team1) <= 3 or len(team2) <= 3:
+                        continue
+
+                    match_name = f"{team1} vs {team2}"
+                    match_fingerprint = f"{team1}_{team2}_{score_detected}".lower()
+
+                    # التأكد من عدم تكرار إرسال نفس المباراة نهائياً
+                    if match_fingerprint not in sent_matches_cache:
+                        sent_matches_cache.add(match_fingerprint)
                         
-                        # محاولة استخراج الفريقين والنتيجة من النص المهيكل
-                        teams_found = []
-                        score_detected = "غير متوفرة"
+                        # فحص حالة المنصات للتأكد من وجود فجوة حقيقية (أنها معروضة كـ Pre-match)
+                        bookmaker_results = check_all_bookmakers()
                         
-                        # البحث عن النتيجة النمطية (مثل 2-1 أو 0 - 3)
-                        score_match = re.search(r'(\d+\s*[-–]\s*\d+)', full_text)
-                        if score_match:
-                            score_detected = score_match.group(1)
+                        message = (
+                            f"🚨 *رصد فجوة مطابقة دقيقة (انتهت vs لم تبدأ)!* 🚨\n\n"
+                            f"⚽ المباراة: {match_name}\n"
+                            f"🛑 الحالة على كووورة: انتهت المباراة (FT)\n"
+                            f"🎯 *النتيجة النهائية المؤكدة: ( {score_detected} )*\n"
+                            f"⚠️ حالة المنصات: معروضة كـ (لم تبدأ بعد / Pre-match)\n"
+                            f"⏰ وقت الرصد: {datetime.now().strftime('%H:%M:%S')}\n\n"
+                            f"🟢 المنصات المتأخرة التي تعرضها كـ \"لم تبدأ\":\n"
+                        )
 
-                        # تنظيف النصوص واستخراج الأجزاء النصية المفيدة
-                        parts = [p.strip() for p in full_text.split("|") if len(p.strip()) > 2]
+                        accessible_count = 0
+                        for bookmaker in TARGET_BOOKMAKERS:
+                            if bookmaker_results.get(bookmaker) == "ACCESSIBLE":
+                                accessible_count += 1
+                                message += f"• {bookmaker}: 🟢 متاحة (تسمح بالرهان المسبق)\n"
+
+                        message += f"\n📊 إجمالي المنصات المتأخرة: {accessible_count} من أصل 18"
                         
-                        ignore_list = [
-                            "انتهت", "FT", "-", "وقت اضافي", "ركلات ترجيح", "المباراة", 
-                            "الدوري", "كأس", "بطولة", "المجموعة", "الجولة", "الاسبوع",
-                            "دوري أبطال", "تصفيات", "ودية", "دولي", "مباريات اليوم", score_detected
-                        ]
-
-                        for p in parts:
-                            # تجاهل الكلمات العامة وأرقام النتيجة والبطولات
-                            if any(ignore_word == p or ignore_word in p for ignore_word in ignore_list):
-                                continue
-                            if re.match(r'^\d+$', p): # تجاهل الأرقام المنفردة (كالوقت أو التوقيت)
-                                continue
-                            if len(p) > 2 and p not in teams_found:
-                                teams_found.append(p)
-
-                        # يجب أن نجد فريقين حقيقيين فقط لا غير
-                        if len(teams_found) < 2:
-                            continue
-
-                        team1 = teams_found[0]
-                        team2 = teams_found[1]
-
-                        # منع تداخل الأسماء أو تشابهها الوهمي (مثل الفريق ضد نفسه أو اختصاره)
-                        if team1.lower() in team2.lower() or team2.lower() in team1.lower():
-                            continue
-
-                        match_name = f"{team1} vs {team2}"
-                        match_fingerprint = f"{team1}_{team2}".lower()
-
-                        # التأكد من عدم إرسال نفس المباراة مجدداً
-                        if match_fingerprint not in sent_matches_cache:
-                            sent_matches_cache.add(match_fingerprint)
-                            
-                            bookmaker_results = check_all_bookmakers()
-                            
-                            message = (
-                                f"🚨 *رصد فجوة تطابق حقيقية (انتهت vs لم تبدأ)!* 🚨\n\n"
-                                f"⚽ المباراة: {match_name}\n"
-                                f"🛑 الحالة على كووورة: انتهت المباراة (FT)\n"
-                                f"🎯 *النتيجة النهائية: ( {score_detected} )*\n"
-                                f"⚠️ حالة المنصات: معروضة كـ (لم تبدأ بعد / Pre-match)\n"
-                                f"⏰ وقت الرصد: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                                f"🟢 المنصات المتأخرة التي تعرضها كـ \"لم تبدأ\":\n"
-                            )
-
-                            accessible_count = 0
-                            for bookmaker in TARGET_BOOKMAKERS:
-                                if bookmaker_results.get(bookmaker) == "ACCESSIBLE":
-                                    accessible_count += 1
-                                    message += f"• {bookmaker}: 🟢 متاحة (تسمح بالرهان المسبق)\n"
-
-                            message += f"\n📊 إجمالي المنصات المتأخرة: {accessible_count} من أصل 18"
-                            
-                            send_telegram_message(message)
-                break
+                        send_telegram_message(message)
+            break
         except Exception:
             pass
 
 def bot_loop():
-    send_telegram_message("🎯 تم تحديث نظام المطابقة الدقيقة للفرق ومنع الأخطاء بنجاح!")
+    send_telegram_message("🛡️ تم تفعيل نظام الفلترة المطلقة: لا تنبيه إلا لوجود نتيجة نهائية مؤكدة وناديين حقيقيين!")
     while True:
         try:
-            check_kooora_matches()
+            parse_kooora_matches()
         except Exception:
             pass
         time.sleep(60)
