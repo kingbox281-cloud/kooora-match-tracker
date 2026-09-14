@@ -24,6 +24,8 @@ except Exception:
 # CONFIG
 # ============================================================
 
+APP_VERSION = "KOOORA_BROWSER_V2"
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
@@ -92,8 +94,18 @@ app = Flask(__name__)
 def home():
     return (
         "Kooora Match Tracker is running. "
+        f"Version={APP_VERSION} | "
         f"Browser/JS={'ON' if PLAYWRIGHT_AVAILABLE else 'OFF'}"
     )
+
+
+@app.route("/version")
+def version():
+    return {
+        "version": APP_VERSION,
+        "browser_js": PLAYWRIGHT_AVAILABLE,
+        "scan_seconds": SCAN_SECONDS,
+    }
 
 
 @app.route("/health")
@@ -843,7 +855,7 @@ def process_scan():
 
 def scanner_loop():
     print(
-        f"[START] Kooora Match Tracker | "
+        f"[START] {APP_VERSION} | Kooora Match Tracker | "
         f"interval={SCAN_SECONDS}s | "
         f"Playwright={'AVAILABLE' if PLAYWRIGHT_AVAILABLE else 'NOT INSTALLED'}"
     )
