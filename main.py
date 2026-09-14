@@ -518,8 +518,10 @@ def parse_kooora_match_element(match_element):
             middle = basic_text[first_score.end():second_score.start()].strip()
 
             # Kooora appends a 2-4 letter Latin team abbreviation to each name.
+            # The second team's code is at the END of the middle slice.
             left = re.sub(r"\s+\b[A-Z]{2,4}\b\s*$", "", left).strip()
             middle = re.sub(r"^\b[A-Z]{2,4}\b\s+", "", middle).strip()
+            middle = re.sub(r"\s+\b[A-Z]{2,4}\b\s*$", "", middle).strip()
 
             # Remove any remaining status token if it leaked into the slice.
             left = _clean_team_value(left)
