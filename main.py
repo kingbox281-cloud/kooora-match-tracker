@@ -635,30 +635,54 @@ def parse_kooora_match_element(match_element):
         return None
 
     score = _extract_score_values_from_match(match_element)
-    teams = _extract_team_values_from_match(match_element)
 
-    # If team elements were not discoverable, try the basic text around the score.
+    # IMPORTANT: On the current Kooora DOM the same team text can be repeated
+    # by nested elements. The reliable representation is the basic-data line:
+    #   TEAM CODE SCORE TEAM CODE SCORE انتهت
+    # Parse the two sides directly from the score positions first.
+    basic = match_element.select_one(".fco-match-basic-data")
+    basic_text = (
+        clean_text(basic.get_text(" ", strip=True))
+        if basic
+        else clean_text(match_element.get_text(" ", strip=True))
+    )
+
+    teams = None
+    nums = list(SINGLE_SCORE_RE.finditer(basic_text))
+
+    if score and len(nums) >= 2:
+        # Find the first two numeric tokens matching the actual final score.
+        wanted = [str(score[0]), str(score[1])]
+        positions = []
+        wanted_index = 0
+
+        for m in nums:
+            if wanted_index < 2 and m.group(0) == wanted[wanted_index]:
+                positions.append(m)
+                wanted_index += 1
+
+        if len(positions) == 2:
+            first_score = positions[0]
+            second_score = positions[1]
+
+            left = basic_text[:first_score.start()].strip()
+            middle = basic_text[first_score.end():second_score.start()].strip()
+
+            # Kooora appends a 2-4 letter Latin team abbreviation to each name.
+            left = re.sub(r"\s+\b[A-Z]{2,4}\b\s*$", "", left).strip()
+            middle = re.sub(r"^\b[A-Z]{2,4}\b\s+", "", middle).strip()
+
+            # Remove any remaining status token if it leaked into the slice.
+            left = _clean_team_value(left)
+            middle = _clean_team_value(middle)
+
+            if left and middle:
+                teams = (left, middle)
+
+    # DOM team elements are only a fallback because they may repeat the same
+    # team at multiple nesting levels.
     if not teams:
-        basic = match_element.select_one(".fco-match-basic-data")
-        basic_text = clean_text(basic.get_text(" ", strip=True)) if basic else clean_text(match_element.get_text(" ", strip=True))
-        # Common Kooora fallback: TEAM CODE SCORE TEAM CODE SCORE.
-        nums = list(SINGLE_SCORE_RE.finditer(basic_text))
-        if score and len(nums) >= 2:
-            s1, s2 = str(score[0]), str(score[1])
-            positions = []
-            for m in nums:
-                if m.group(0) in (s1, s2):
-                    positions.append(m)
-            if len(positions) >= 2:
-                first_score_pos = positions[0].start()
-                second_score_pos = positions[1].start()
-                left = basic_text[:first_score_pos].strip()
-                middle = basic_text[positions[0].end():second_score_pos].strip()
-                # Remove likely 3-letter team codes from the end/start.
-                left = re.sub(r"\b[A-Z]{2,4}\b\s*$", "", left).strip()
-                middle = re.sub(r"^\b[A-Z]{2,4}\b\s*", "", middle).strip()
-                if left and middle:
-                    teams = (left, middle)
+        teams = _extract_team_values_from_match(match_element)
 
     if not teams:
         return None
