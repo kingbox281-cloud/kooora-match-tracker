@@ -7,10 +7,6 @@ from datetime import datetime
 from flask import Flask
 from bs4 import BeautifulSoup
 
-# =========================================================
-# FLASK / RENDER SETUP
-# =========================================================
-
 app = Flask(__name__)
 
 @app.route("/")
@@ -20,10 +16,6 @@ def home():
 @app.route("/health")
 def health():
     return "OK"
-
-# =========================================================
-# TELEGRAM CONFIG
-# =========================================================
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
@@ -38,10 +30,6 @@ def send_telegram_message(message):
         return response.json()
     except Exception:
         return None
-
-# =========================================================
-# TARGETS CONFIG
-# =========================================================
 
 KOOORA_URLS = [
     "https://www.kooora.com/%D9%83%D8%B1%D8%A9-%D8%A7%D9%84%D9%82%D8%AF%D9%85/%D9%85%D8%A8%D8%A7%D8%B1%D9%8A%D8%A7%D8%AA-%D8%A7%D9%84%D9%8A%D9%88%D9%85",
@@ -113,11 +101,7 @@ def check_all_bookmakers():
         results[bookmaker] = check_bookmaker_access(bookmaker)
     return results
 
-# =========================================================
-# BOT MONITORING LOGIC
-# =========================================================
-
-sent_alerts = set()
+sent_matches_cache = set()
 
 def check_kooora_matches():
     for url in KOOORA_URLS:
@@ -125,41 +109,49 @@ def check_kooora_matches():
             response = requests.get(url, headers=KOOORA_HEADERS, timeout=10)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
-                current_league = "الدوري العام"
                 
-                for match in soup.find_all(["tr", "div"]):
-                    text = match.get_text(separator=" ", strip=True)
-                    if not text:
-                        continue
+                # البحث في جدول المباريات الخاص بكووورة
+                match_rows = soup.find_all(["tr", "li", "div"], class_=lambda x: x and ('match' in x or 'fi' in x))
+                if not match_rows:
+                    match_rows = soup.find_all("tr")
 
-                    if "الدوري" in text or "كأس" in text:
-                        current_league = text[:50]
+                for row in match_rows:
+                    text = row.get_text(separator=" | ", strip=True)
+                    if not text or len(text) < 10:
+                        continue
 
                     upper_text = text.upper()
                     
-                    # التركيز على المباريات التي انتهت (FT)
-                    if "انتهت" in text or "FT" in upper_text:
-                        # تنظيف النص واستخراج النتيجة وأسماء الفرق بدقة أكبر
-                        clean_text = re.sub(r'\s+', ' ', text)
+                    # التحقق مما إذا كانت المباراة قد انتهت
+                    if "انتهت" in text or "FT" in upper_text or "مؤجلة" in text:
+                        parts = [p.strip() for p in text.split("|") if len(p.strip()) > 1]
                         
-                        # محاولة البحث عن نمط النتيجة (مثل 2 - 1 أو 3-0)
-                        score_match = re.search(r'(\d+\s*-\s*\d+)', clean_text)
-                        score_detected = score_match.group(1) if score_match else "غير متوفرة"
+                        # تصفية الكلمات الزائدة
+                        filtered_parts = [p for p in parts if p not in ["انتهت", "FT", "-", "وقت اضافي", "ركلات ترجيح"]]
+                        if len(filtered_parts) < 2:
+                            continue
 
-                        # استخراج اسم المباراة بشكل أفضل (إزالة كلمات الحالة والنتيجة)
-                        match_name = clean_text.replace("انتهت", "").replace("FT", "").replace(score_detected, "")
-                        match_name = " ".join([w for w in match_name.split() if len(w) > 1])[:60]
-                        if not match_name.strip():
-                            match_name = "مباراة مرصودة"
+                        # استخراج اسم الفريقين والنتيجة بطريقة منظمة
+                        match_name = f"{filtered_parts[0]} vs {filtered_parts[1]}"
+                        
+                        # البحث عن النتيجة (أرقام مفصولة بشرطة أو مسافة)
+                        score_detected = "غير متوفرة"
+                        for p in filtered_parts:
+                            if re.match(r'^\d+\s*[-–]\s*\d+$', p):
+                                score_detected = p
+                                break
 
-                        match_id = f"{match_name}|FT|{score_detected}"
-                        if match_id not in sent_alerts:
+                        # مفتاح فريد لمنع تكرار الإرسال نهائياً لنفس المباراة
+                        match_key = f"{filtered_parts[0]}-{filtered_parts[1]}"
+                        
+                        if match_key not in sent_matches_cache:
+                            sent_matches_cache.add(match_key)
+                            
                             bookmaker_results = check_all_bookmakers()
                             
                             message = (
                                 f"🚨 *رصد فجوة توقيت/حالة (انتهت vs لم تبدأ)!* 🚨\n\n"
                                 f"⚽ المباراة: {match_name}\n"
-                                f"🏆 البطولة: {current_league}\n"
                                 f"🛑 الحالة على كووورة: انتهت المباراة (FT)\n"
                                 f"🎯 *النتيجة النهائية: ( {score_detected} )*\n"
                                 f"⚠️ حالة المنصات: معروضة كـ (لم تبدأ بعد / Pre-match)\n"
@@ -176,19 +168,18 @@ def check_kooora_matches():
                             message += f"\n📊 إجمالي المنصات المتأخرة: {accessible_count} من أصل 18"
                             
                             send_telegram_message(message)
-                            sent_alerts.add(match_id)
                 break
         except Exception:
             pass
 
 def bot_loop():
-    send_telegram_message("🚀 تم تحديث وتشغيل بوت رصد الفجوات والنتيجة بنجاح 24/7!")
+    send_telegram_message("🚀 تم تحديث البوت لتنقية الأسماء والنتائج ومنع التكرار بنجاح!")
     while True:
         try:
             check_kooora_matches()
         except Exception:
             pass
-        time.sleep(20)
+        time.sleep(40) # زيادة المهلة إلى 40 ثانية لتوفير الأداء المريح
 
 bot_thread = threading.Thread(target=bot_loop, daemon=True)
 bot_thread.start()
