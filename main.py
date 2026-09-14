@@ -43,7 +43,7 @@ KOOORA_HEADERS = {
 
 TARGET_BOOKMAKERS = [
     "Tipico", "Tipwin", "Merkur Bets", "sportwetten.de", "NEO.bet", 
-    "bet365", "Winamax", "bwin", "Betano", "Bet-at-home", ,
+    "bet365", "Winamax", "bwin", "Betano", "Bet-at-home", 
     "ODDSET", "Interwetten", "DAZN Bet", "AdmiralBet", 
     "Betway", "LeoVegas", "VBET", "Bet3000"
 ]
@@ -101,7 +101,6 @@ def check_all_bookmakers():
         results[bookmaker] = check_bookmaker_access(bookmaker)
     return results
 
-# ذاكرة لتخزين المباريات التي تم إرسالها لمنع التكرار تماماً
 sent_matches_cache = set()
 
 def check_kooora_matches():
@@ -111,7 +110,6 @@ def check_kooora_matches():
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
                 
-                # البحث في عناصر الجدول أو الكتل الخاصة بالمباريات
                 match_blocks = soup.find_all(["tr", "div", "li"], class_=lambda x: x and ('match' in x or 'fi' in x or 'game' in x))
                 if not match_blocks:
                     match_blocks = soup.find_all("tr")
@@ -123,24 +121,18 @@ def check_kooora_matches():
 
                     upper_text = text.upper()
                     
-                    # التحقق الدقيق من حالة انتهاء المباراة
                     if "انتهت" in text or "FT" in upper_text:
                         parts = [p.strip() for p in text.split("|") if len(p.strip()) > 1]
                         
-                        # تصفية الكلمات التوضيحية وغير المهمة
                         cleaned = [p for p in parts if p not in ["انتهت", "FT", "-", "وقت اضافي", "ركلات ترجيح", "المباراة"]]
-                        
-                        # يجب أن نجد على الأقل اسم الفريق الأول والثاني
                         if len(cleaned) < 2:
                             continue
 
-                        # اختيار اسم الفريقين بذكاء وتجنب أسماء البطولات الطويلة
                         team1 = ""
                         team2 = ""
                         score_detected = "غير متوفرة"
 
                         for p in cleaned:
-                            # البحث عن النتيجة (مثلاً 2-1 أو 1 - 0)
                             if re.match(r'^\d+\s*[-–]\s*\d+$', p):
                                 score_detected = p
                             elif not team1 and len(p) > 2 and "الدوري" not in p and "كأس" not in p and "الجولة" not in p:
@@ -154,7 +146,6 @@ def check_kooora_matches():
                         match_name = f"{team1} vs {team2}"
                         match_fingerprint = f"{team1}_{team2}".lower()
 
-                        # التأكد من أن المباراة لم ترسل من قبل
                         if match_fingerprint not in sent_matches_cache:
                             sent_matches_cache.add(match_fingerprint)
                             
@@ -184,13 +175,12 @@ def check_kooora_matches():
             pass
 
 def bot_loop():
-    send_telegram_message("🚀 تم تفعيل مطابقة الفرق بدقة ومنع التكرار بنجاح!")
+    send_telegram_message("🚀 تم تصحيح الكود وإعادة تشغيل البوت بنجاح!")
     while True:
         try:
             check_kooora_matches()
         except Exception:
             pass
-        # فحص كل دقيقة لتوفير الاستقرار التام
         time.sleep(60)
 
 bot_thread = threading.Thread(target=bot_loop, daemon=True)
