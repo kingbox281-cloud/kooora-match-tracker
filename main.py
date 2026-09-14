@@ -373,120 +373,91 @@ def _clean_team_value(value):
 
 
 def _extract_score_values_from_match(match_element):
-    """Extract the actual FT/HT score from a Kooora match item.
+    """Get two numeric scores from the match DOM, preferring score elements."""
+    values = []
 
-    Important: Kooora also uses HH:MM for fixture times. Therefore we do
-    NOT treat the first number pair in the whole match as a score.
-    For RESULT/LIVE match items, the basic-data text is parsed first.
-    """
-    basic = match_element.select_one(".fco-match-basic-data")
-
-    if basic:
-        basic_text = clean_text(basic.get_text(" ", strip=True))
-
-        # Current Kooora result format is typically:
-        # TEAM_NAME CODE 2 TEAM_NAME CODE 1
-        # The two standalone numbers are the home/away scores.
-        nums = list(SINGLE_SCORE_RE.finditer(basic_text))
-
-        if len(nums) >= 2:
-            first = nums[0]
-            second = nums[1]
-
-            try:
-                a = int(first.group(1))
-                b = int(second.group(1))
-
-                # Football scores on Kooora are normally 0-0 through
-                # 99-99. This deliberately avoids interpreting a time
-                # such as 14:45 as a score.
-                if 0 <= a <= 99 and 0 <= b <= 99:
-                    return a, b
-            except (TypeError, ValueError):
-                pass
-
-    # Fallback: inspect explicit score/result elements.
+    # First: elements whose class/id explicitly suggests score/result.
     for el in match_element.find_all(True):
         hay = (
             _class_text(el) + " " + str(el.get("id", "")) + " " +
             str(el.get("data-testid", ""))
         ).lower()
-
         if not any(x in hay for x in ["score", "result", "goals"]):
             continue
-
         text = clean_text(el.get_text(" ", strip=True))
         m = SCORE_RE.search(text)
         if m:
             return int(m.group(1)), int(m.group(2))
+        nums = SINGLE_SCORE_RE.findall(text)
+        if nums:
+            for n in nums:
+                values.append(int(n))
+                if len(values) == 2:
+                    return values[0], values[1]
+
+    # Second: inspect the basic-data block and its small descendants.
+    basic = match_element.select_one(".fco-match-basic-data")
+    roots = [basic] if basic else []
+    roots.append(match_element)
+
+    for root in roots:
+        for el in root.find_all(["span", "div", "strong", "b", "em", "p"]):
+            text = clean_text(el.get_text(" ", strip=True))
+            if not text or len(text) > 40:
+                continue
+            m = SCORE_RE.fullmatch(text)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+            if SINGLE_SCORE_RE.fullmatch(text):
+                values.append(int(text))
+                if len(values) >= 2:
+                    return values[-2], values[-1]
+
+    # Last fallback: colon/dash notation anywhere in the match.
+    text = clean_text(match_element.get_text(" ", strip=True))
+    return extract_score(text)
+
+
+def _extract_team_values_from_match(match_element):
+    """Extract team names from the current fco DOM."""
+    teams = []
+
+    # Prefer elements with team-like class/id names.
+    for el in match_element.find_all(True):
+        if not _looks_like_team_element(el):
+            continue
+        text = _clean_team_value(el.get_text(" ", strip=True))
+        if not text or len(text) < 2 or len(text) > 100:
+            continue
+        if SINGLE_SCORE_RE.fullmatch(text) or SCORE_RE.fullmatch(text):
+            continue
+        if text not in teams:
+            teams.append(text)
+        if len(teams) >= 2:
+            return teams[0], teams[1]
+
+    # Generic fallback: inspect direct-ish children of fco-match-basic-data.
+    basic = match_element.select_one(".fco-match-basic-data")
+    if basic:
+        candidates = []
+        for el in basic.find_all(["a", "span", "div", "strong", "b", "p"]):
+            text = _clean_team_value(el.get_text(" ", strip=True))
+            if not text or len(text) < 2 or len(text) > 100:
+                continue
+            if STATUS_RE.search(text):
+                continue
+            if SCORE_RE.fullmatch(text) or SINGLE_SCORE_RE.fullmatch(text):
+                continue
+            # Avoid parent containers that merely repeat both teams.
+            if len(el.find_all(True)) > 6:
+                continue
+            if text not in candidates:
+                candidates.append(text)
+        if len(candidates) >= 2:
+            return candidates[0], candidates[1]
 
     return None
 
-def _extract_team_values_from_match(match_element):
-    """Extract the two team names from the current Kooora DOM.
-
-    Current Kooora structure observed in Render:
-        .fco-match-basic-data
-        "إف سي أوساكا FCO 2 إيهمي إف سي EHF 1"
-
-    The old DOM logic could select the same parent element twice, producing:
-        "إف سي أوساكا FCO vs إف سي أوساكا"
-    This parser instead uses the positions of the two score numbers and
-    removes the short team codes around them.
-    """
-    basic = match_element.select_one(".fco-match-basic-data")
-
-    if not basic:
-        return None
-
-    basic_text = clean_text(basic.get_text(" ", strip=True))
-
-    # Remove status if it is included in the basic block.
-    basic_text = STATUS_RE.sub(" ", basic_text)
-    basic_text = normalize_space(basic_text)
-
-    nums = list(SINGLE_SCORE_RE.finditer(basic_text))
-
-    if len(nums) < 2:
-        return None
-
-    first = nums[0]
-    second = nums[1]
-
-    team1 = basic_text[:first.start()].strip()
-    team2 = basic_text[first.end():second.start()].strip()
-
-    # Remove Kooora's short Latin team code, e.g. FCO / EHF / NIG / PLU.
-    team1 = re.sub(r"\s+[A-Z]{2,5}$", "", team1).strip()
-    team2 = re.sub(r"^[A-Z]{2,5}\s+", "", team2).strip()
-    team2 = re.sub(r"\s+[A-Z]{2,5}$", "", team2).strip()
-
-    # Sometimes the code is separated by punctuation.
-    team1 = re.sub(r"\s*[-|:]\s*[A-Z]{2,5}$", "", team1).strip()
-    team2 = re.sub(r"^[A-Z]{2,5}\s*[-|:]\s*", "", team2).strip()
-
-    team1 = _clean_team_value(team1)
-    team2 = _clean_team_value(team2)
-
-    if not team1 or not team2:
-        return None
-
-    if not (2 <= len(team1) <= 100 and 2 <= len(team2) <= 100):
-        return None
-
-    # Reject obvious container text.
-    bad_words = [
-        "المباريات", "النتائج", "الدوري", "البطولة",
-        "الجولة", "شاهد مباشرة", "beIN Sports", "stc tv"
-    ]
-
-    if any(word.lower() in team1.lower() for word in bad_words):
-        return None
-
-    if any(word.lower() in team2.lower() for word in bad_words):
-        return None
-
-    return team1, team2
 
 def extract_team_names(text):
     """Legacy text fallback. DOM parsing is preferred."""
@@ -541,39 +512,124 @@ def is_real_match(text):
     return detect_status(text) in ["FT", "HT"]
 
 
-def parse_kooora_match_element(match_element):
-    """Parse one current Kooora fco-match-list-item."""
-    status_el = match_element.select_one(".fco-match-status")
-    status_text = (
-        clean_text(status_el.get_text(" ", strip=True))
-        if status_el
-        else ""
-    )
+def _extract_kooora_competition_context(match_element):
+    """
+    Extract country/competition/round from the Kooora section containing the
+    match. Kooora puts this information outside the individual match item.
+    """
+    context = {
+        "country": None,
+        "league": None,
+        "round": None,
+    }
 
+    section = None
+    parent = match_element.parent
+
+    # The current Kooora page uses a section class similar to:
+    # match-list_livescores-match-list__section__n742K
+    for _ in range(8):
+        if parent is None:
+            break
+        classes = " ".join(parent.get("class", []))
+        if "match-list_livescores-match-list__section" in classes:
+            section = parent
+            break
+        parent = parent.parent
+
+    if section is None:
+        return context
+
+    # First try elements before the match item. This avoids accidentally
+    # treating another match's team name as the competition name.
+    before_texts = []
+    for node in section.find_all(["h1", "h2", "h3", "h4", "div", "span", "p", "strong"]):
+        if node is match_element or match_element in node.parents:
+            continue
+
+        text = clean_text(node.get_text(" ", strip=True))
+        if not text or len(text) > 140:
+            continue
+
+        try:
+            is_before = node.sourceline < match_element.sourceline
+        except Exception:
+            is_before = False
+
+        if is_before:
+            before_texts.append(text)
+
+    # Keep unique values while preserving page order.
+    unique = []
+    for text in before_texts:
+        if text not in unique:
+            unique.append(text)
+
+    # Round, e.g. "الجولة 3"
+    combined = " | ".join(unique)
+    round_match = re.search(r"الجولة\\s*[:\\-]?\\s*(\\d+)", combined, re.I)
+    if round_match:
+        context["round"] = f"الجولة {round_match.group(1)}"
+
+    # Competition names normally contain one of these Arabic competition
+    # keywords. Prefer the shortest useful header-like value.
+    competition_keywords = (
+        "الدوري", "كأس", "بطولة", "دوري", "دوريّة", "دوريه"
+    )
+    competition_candidates = []
+    for text in unique:
+        if "الجولة" in text:
+            continue
+        if any(keyword in text for keyword in competition_keywords):
+            # Do not accept generic navigation labels.
+            if text in ("الدوري", "كأس", "بطولة", "الدوري العام"):
+                continue
+            competition_candidates.append(text)
+
+    if competition_candidates:
+        # Prefer a concise header rather than a huge container text.
+        context["league"] = min(competition_candidates, key=len)[:100]
+
+    # Common country names on Arabic Kooora pages. This is intentionally
+    # conservative so team names are not mistaken for countries.
+    countries = [
+        "نيجيريا", "مصر", "العراق", "السعودية", "الإمارات", "قطر",
+        "الكويت", "البحرين", "الأردن", "المغرب", "الجزائر", "تونس",
+        "ليبيا", "سوريا", "لبنان", "فلسطين", "تركيا", "ألمانيا",
+        "فرنسا", "إسبانيا", "إيطاليا", "إنجلترا", "هولندا", "بلجيكا",
+        "البرتغال", "البرازيل", "الأرجنتين", "المكسيك", "أمريكا",
+        "اليابان", "كوريا الجنوبية", "الصين", "أستراليا", "الهند",
+        "جنوب أفريقيا", "غانا", "السنغال", "الكاميرون", "ساحل العاج",
+        "مالي", "زامبيا", "تنزانيا", "أوغندا", "كينيا"
+    ]
+
+    for text in unique:
+        if "الجولة" in text:
+            continue
+        if context["league"] and text == context["league"]:
+            continue
+        for country_name in countries:
+            if re.search(rf"(?<!\\w){re.escape(country_name)}(?!\\w)", text):
+                context["country"] = country_name
+                break
+        if context["country"]:
+            break
+
+    return context
+
+
+def parse_kooora_match_element(match_element):
+    """Parse one fco-match-list-item without requiring all fields in one text node."""
+    status_el = match_element.select_one(".fco-match-status")
+    status_text = clean_text(status_el.get_text(" ", strip=True)) if status_el else clean_text(match_element.get_text(" ", strip=True))
     status = detect_status(status_text)
 
-    # RESULT + انتهت is a confirmed FT result.
     if status not in ["FT", "HT"]:
-        data_status = str(
-            match_element.get("data-match-status", "")
-        ).upper()
-
-        whole = clean_text(match_element.get_text(" ", strip=True))
-
-        if data_status == "RESULT" and re.search(
-            r"انتهت|إنتهت|\bFT\b|FULL[\s_-]*TIME",
-            whole,
-            re.IGNORECASE
-        ):
-            status = "FT"
-
-        elif re.search(
-            r"استراحة|الشوط\s+الأول|الشوط\s+الاول|\bHT\b|"
-            r"HALF[\s_-]*TIME",
-            whole,
-            re.IGNORECASE
-        ):
-            status = "HT"
+        # data-match-status=RESULT strongly indicates FT/result.
+        if str(match_element.get("data-match-status", "")).upper() == "RESULT":
+            whole = clean_text(match_element.get_text(" ", strip=True))
+            if re.search(r"انتهت|إنتهت|\bFT\b|FULL[\s_-]*TIME", whole, re.I):
+                status = "FT"
 
     if status not in ["FT", "HT"]:
         return None
@@ -581,20 +637,47 @@ def parse_kooora_match_element(match_element):
     score = _extract_score_values_from_match(match_element)
     teams = _extract_team_values_from_match(match_element)
 
-    if score is None or teams is None:
-        print(
-            "⚠️ Kooora match item found but parsing failed: "
-            f"{clean_text(match_element.get_text(' ', strip=True))[:250]}",
-            flush=True
-        )
+    # If team elements were not discoverable, try the basic text around the score.
+    if not teams:
+        basic = match_element.select_one(".fco-match-basic-data")
+        basic_text = clean_text(basic.get_text(" ", strip=True)) if basic else clean_text(match_element.get_text(" ", strip=True))
+        # Common Kooora fallback: TEAM CODE SCORE TEAM CODE SCORE.
+        nums = list(SINGLE_SCORE_RE.finditer(basic_text))
+        if score and len(nums) >= 2:
+            s1, s2 = str(score[0]), str(score[1])
+            positions = []
+            for m in nums:
+                if m.group(0) in (s1, s2):
+                    positions.append(m)
+            if len(positions) >= 2:
+                first_score_pos = positions[0].start()
+                second_score_pos = positions[1].start()
+                left = basic_text[:first_score_pos].strip()
+                middle = basic_text[positions[0].end():second_score_pos].strip()
+                # Remove likely 3-letter team codes from the end/start.
+                left = re.sub(r"\b[A-Z]{2,4}\b\s*$", "", left).strip()
+                middle = re.sub(r"^\b[A-Z]{2,4}\b\s*", "", middle).strip()
+                if left and middle:
+                    teams = (left, middle)
+
+    if not teams:
         return None
 
+    match_name = f"{teams[0]} vs {teams[1]}"
+    if score is None:
+        return None
+
+    context = _extract_kooora_competition_context(match_element)
+
     return {
-        "match_name": f"{teams[0]} vs {teams[1]}",
+        "match_name": match_name,
         "team1": teams[0],
         "team2": teams[1],
         "score": score,
         "status": status,
+        "country": context.get("country"),
+        "league": context.get("league"),
+        "round": context.get("round"),
         "raw": clean_text(match_element.get_text(" ", strip=True))
     }
 
@@ -1043,7 +1126,14 @@ def process_candidate_text(
         score = text.get("score")
         status = text.get("status")
         raw_text = text.get("raw", "")
+        # Kooora competition context belongs to the section around the match.
+        if text.get("country"):
+            country = text["country"]
+        if text.get("league"):
+            league = text["league"]
+        round_name = text.get("round")
     else:
+        round_name = None
         raw_text = clean_text(text)
         if not is_real_match(raw_text):
             return 0
@@ -1072,7 +1162,7 @@ def process_candidate_text(
     format_and_send_alert(
         match_name,
         country,
-        league,
+        league + (f" — {round_name}" if round_name else ""),
         status,
         score
     )
