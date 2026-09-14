@@ -467,6 +467,80 @@ def _extract_team_values_from_match(match_element):
     return result[:2]
 
 
+def _extract_kooora_competition_context(match_element):
+    """
+    Read competition/country/round from the Kooora section containing the
+    match. Example section text:
+    الدوري النيجيري للمحترفين نيجيريا الجولة 3 نيجر تورنادوس NIG 1 ...
+    """
+    result = {"country": None, "league": None, "round": None}
+
+    section = None
+    parent = match_element.parent
+
+    for _ in range(8):
+        if parent is None:
+            break
+        classes = " ".join(parent.get("class", []))
+        if "match-list_livescores-match-list__section" in classes:
+            section = parent
+            break
+        parent = parent.parent
+
+    if section is None:
+        return result
+
+    # The section header is represented by an element containing "الجولة".
+    # Its text is much safer than parsing the complete section container.
+    header = None
+    for el in section.find_all(["div", "span", "h1", "h2", "h3", "h4"]):
+        text = clean_text(el.get_text(" ", strip=True))
+        if "الجولة" in text:
+            # Prefer the smallest element that still contains the header.
+            if header is None or len(text) < len(header[0]):
+                header = (text, el)
+
+    header_text = header[0] if header else ""
+
+    round_match = re.search(r"الجولة\s*[:\-]?\s*(\d+)", header_text, re.I)
+    if round_match:
+        result["round"] = f"الجولة {round_match.group(1)}"
+
+    # Remove the round and everything after it. In the observed Kooora DOM,
+    # what remains is competition + country.
+    prefix = re.sub(
+        r"\s*الجولة\s*[:\-]?\s*\d+.*$",
+        "",
+        header_text,
+        flags=re.I,
+    ).strip()
+
+    # Known country names. Match the longest first for names such as
+    # "جنوب أفريقيا" and "كوريا الجنوبية".
+    countries = [
+        "جنوب أفريقيا", "كوريا الجنوبية", "ساحل العاج",
+        "نيجيريا", "اليابان", "جورجيا", "إيطاليا", "إسبانيا",
+        "ألمانيا", "فرنسا", "إنجلترا", "هولندا", "بلجيكا",
+        "البرتغال", "البرازيل", "الأرجنتين", "المكسيك", "أمريكا",
+        "مصر", "العراق", "السعودية", "الإمارات", "قطر", "الكويت",
+        "البحرين", "الأردن", "المغرب", "الجزائر", "تونس", "ليبيا",
+        "سوريا", "لبنان", "فلسطين", "تركيا", "الصين", "أستراليا",
+        "الهند", "غانا", "السنغال", "الكاميرون", "مالي", "زامبيا",
+        "تنزانيا", "أوغندا", "كينيا",
+    ]
+
+    for country in sorted(countries, key=len, reverse=True):
+        if country in prefix:
+            result["country"] = country
+            result["league"] = prefix.replace(country, "").strip()
+            break
+
+    if result["league"] is None and prefix:
+        result["league"] = prefix
+
+    return result
+
+
 def parse_kooora_match_element(match_element):
     """Parse one fco-match-list-item without requiring all fields in one text node."""
     status_el = match_element.select_one(".fco-match-status")
