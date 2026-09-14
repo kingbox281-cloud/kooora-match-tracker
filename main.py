@@ -13,12 +13,12 @@ def home():
 
 @app.route("/test-telegram")
 def test_telegram_route():
-    """مسار (Route) تجريبي: بمجرد فتح رابط موقعك المرفوع على Render متبوعاً بـ /test-telegram ستصلك رسالة تجريبية فوراً"""
+    """مسار تجريبي: افتح رابط موقعك المرفوع متبوعاً بـ /test-telegram لتصلك رسالة فورية"""
     result = send_test_message()
-    if result:
+    if result and result.get("ok"):
         return "✅ تم إرسال الرسالة التجريبية بنجاح إلى تيليجرام!"
     else:
-        return "❌ فشل إرسال الرسالة، تحقق من التوكن والآيدي."
+        return f"❌ فشل الإرسال، استجابة تيليجرام: {result}"
 
 # ==================== إعدادات الإتصال ====================
 TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
@@ -74,33 +74,38 @@ def send_telegram_alert(country, league_name, match_name, match_score, kooora_st
         print(f"❌ خطأ في إرسال التنبيه عبر تيليجرام: {e}")
 
 def send_test_message():
-    """دالة إرسال رسالة تجريبية فورية إلى تيليجرام"""
+    """دالة إرسال رسالة تجريبية فورية إلى تيليجرام مع تصحيح parse_mode"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": "🧪 *هذه رسالة تجريبية من بوت مراقبة فجوات كووورة للاطمئنان على الاتصال!*",
-        "parse_Mode": "Markdown"
+        "parse_mode": "Markdown"
     }
     try:
         response = requests.post(url, json=payload, timeout=10)
-        print("✅ تم إرسال رسالة الاختبار بنجاح إلى تيليجرام.")
+        print("✅ استجابة تيليجرام:", response.json())
         return response.json()
     except Exception as e:
         print(f"❌ فشل إرسال رسالة الاختبار: {e}")
         return None
 
 def fetch_kooora_matches_today():
-    """دالة جلب المباريات من كووورة (قيد الإعداد)"""
+    """
+    دالة جلب وتجميع المباريات الحقيقية من كووورة والمنصات.
+    """
     matches_list = []
+    
     try:
-        # --- [ضع كود السحب هنا لاحقاً] ---
+        # --- [ضع كود السحب الحقيقي الخاص بك هنا لاحقاً] ---
         pass
+        
     except Exception as e:
-        print(f"⚠️ خطأ أثناء جلب البيانات: {e}")
+        print(f"⚠️ خطأ أثناء جلب البيانات من الموقع: {e}")
+        
     return matches_list
 
 def run_arbitrage_bot():
-    """حلقة العمل الرئيسية للمراقبة 24/7"""
+    """حلقة العمل الرئيسية التي تعمل بلا توقف 24/7 لمراقبة السوق"""
     print("🤖 بدأ تشغيل بوت مراقبة فجوات كووورة بنجاح...")
     
     # إرسال رسالة تجريبية عند الإقلاع
@@ -109,6 +114,7 @@ def run_arbitrage_bot():
     while True:
         try:
             print("🔄 جاري فحص مباريات اليوم وتحديث الحالة...")
+            
             matches = fetch_kooora_matches_today()
             
             for match in matches:
@@ -121,6 +127,7 @@ def run_arbitrage_bot():
                 
                 if status in ["FT", "انتهت", "Ended"]:
                     delayed_platforms = []
+                    
                     for platform in LIST_OF_18_PLATFORMS:
                         p_status = platforms_data.get(platform, "Closed")
                         if p_status == "Pre-match":
