@@ -20,9 +20,12 @@ def test_telegram_route():
     else:
         return f"❌ فشل الإرسال، استجابة تيليجرام: {result}"
 
-# ==================== إعدادات الإتصال ====================
+# ==================== إعدادات الإتصال (ضع بياناتك هنا) ====================
+# 1. ضع التوكن الذي أخذته من BotFather بين علامتي التنصيص أدناه:
 TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"
+
+# 2. ضع رقم الـ Chat ID الخاص بك (1298444436) بين علامتي التنصيص أدناه:
+TELEGRAM_CHAT_ID = "1298444436"
 
 # رابط صفحة المباريات الأساسي للمراقبة
 KOOORA_LIVE_URL = "https://www.kooora.com/?live=1"
@@ -74,7 +77,7 @@ def send_telegram_alert(country, league_name, match_name, match_score, kooora_st
         print(f"❌ خطأ في إرسال التنبيه عبر تيليجرام: {e}")
 
 def send_test_message():
-    """دالة إرسال رسالة تجريبية فورية إلى تيليجرام مع تصحيح parse_mode"""
+    """دالة إرسال رسالة تجريبية فورية إلى تيليجرام"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
