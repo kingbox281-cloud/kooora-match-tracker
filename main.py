@@ -192,6 +192,17 @@ CAPTCHA_WORDS = [
 ]
 
 
+def detect_captcha(response):
+    """Return True when a bookmaker response looks like a CAPTCHA/bot block."""
+    try:
+        text = (response.text or "").lower()
+    except Exception:
+        text = ""
+
+    # Check title/body content for common challenge pages.
+    return any(word in text for word in CAPTCHA_WORDS)
+
+
 # =========================================================
 # BOOKMAKER MATCH CHECK
 # =========================================================
