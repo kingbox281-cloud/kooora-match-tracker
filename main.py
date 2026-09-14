@@ -1,22 +1,18 @@
 import os
 import time
 import threading
+import re
+import json
 import requests
 from datetime import datetime
 from flask import Flask
 from bs4 import BeautifulSoup
 
-# =========================================================
-# FLASK / RENDER
-# =========================================================
-
 app = Flask(__name__)
-
 
 @app.route("/")
 def home():
     return "Bot is running and monitoring Kooora 24/7!"
-
 
 @app.route("/health")
 def health():
@@ -27,15 +23,8 @@ def health():
 # TELEGRAM
 # =========================================================
 
-TELEGRAM_BOT_TOKEN = os.environ.get(
-    "TELEGRAM_BOT_TOKEN",
-    "YOUR_BOT_TOKEN"
-)
-
-TELEGRAM_CHAT_ID = os.environ.get(
-    "TELEGRAM_CHAT_ID",
-    "YOUR_CHAT_ID"
-)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
 
 def send_telegram_message(message):
@@ -49,30 +38,25 @@ def send_telegram_message(message):
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
-
     try:
         response = requests.post(
             url,
-            json=payload,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message
+            },
             timeout=15
         )
 
-        print(
-            f"Telegram: {response.status_code}",
-            flush=True
-        )
+        print("Telegram:", response.status_code, flush=True)
 
-        return response.json()
+        try:
+            return response.json()
+        except Exception:
+            return {"status_code": response.status_code}
 
     except Exception as e:
-        print(
-            f"Telegram error: {e}",
-            flush=True
-        )
+        print(f"Telegram error: {e}", flush=True)
         return None
 
 
@@ -91,7 +75,14 @@ KOOORA_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "ar,en;q=0.8"
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "ar,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Referer": "https://www.kooora.com/"
 }
 
 
@@ -121,9 +112,6 @@ TARGET_BOOKMAKERS = [
 ]
 
 
-# صفحات عامة فقط.
-# لا يوجد تسجيل دخول ولا تجاوز CAPTCHA.
-
 BOOKMAKER_URLS = {
     "Tipico": "https://www.tipico.de/",
     "Tipwin": "https://www.tipwin.de/",
@@ -147,7 +135,7 @@ BOOKMAKER_URLS = {
 
 
 # =========================================================
-# BOOKMAKER STATUS
+# CAPTCHA DETECTION
 # =========================================================
 
 CAPTCHA_WORDS = [
@@ -165,10 +153,6 @@ CAPTCHA_WORDS = [
 
 
 def detect_captcha(response):
-    """
-    يكتشف صفحات CAPTCHA / حماية البوت.
-    لا يحاول تجاوزها.
-    """
 
     text = response.text.lower()
 
@@ -177,11 +161,9 @@ def detect_captcha(response):
             return True
 
     server_text = (
-        str(response.headers.get("server", ""))
-        + " "
-        + str(response.headers.get("cf-ray", ""))
-        + " "
-        + str(response.headers.get("cf-mitigated", ""))
+        str(response.headers.get("server", "")) + " " +
+        str(response.headers.get("cf-ray", "")) + " " +
+        str(response.headers.get("cf-mitigated", ""))
     ).lower()
 
     for word in CAPTCHA_WORDS:
@@ -191,18 +173,11 @@ def detect_captcha(response):
     return False
 
 
+# =========================================================
+# CHECK BOOKMAKER
+# =========================================================
+
 def check_bookmaker_access(bookmaker):
-    """
-    يفحص فقط إمكانية الوصول إلى الصفحة العامة للمنصة.
-
-    لا يقوم:
-    - بتسجيل الدخول
-    - بتجاوز CAPTCHA
-    - بتنفيذ رهانات
-    - بالتحايل على حماية الموقع
-
-    النتيجة لا تعني أن السوق ما زال مفتوحاً.
-    """
 
     url = BOOKMAKER_URLS.get(bookmaker)
 
@@ -210,15 +185,12 @@ def check_bookmaker_access(bookmaker):
         return "NOT_CHECKED"
 
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": KOOORA_HEADERS["User-Agent"],
         "Accept-Language": "de-DE,de;q=0.9,en;q=0.8"
     }
 
     try:
+
         response = requests.get(
             url,
             headers=headers,
@@ -227,16 +199,15 @@ def check_bookmaker_access(bookmaker):
         )
 
         print(
-            f"{bookmaker}: HTTP {response.status_code} "
+            f"{bookmaker}: HTTP "
+            f"{response.status_code} "
             f"{response.url}",
             flush=True
         )
 
-        # CAPTCHA / حماية البوت
         if detect_captcha(response):
             return "CAPTCHA"
 
-        # حالات منع الوصول
         if response.status_code in [401, 403, 429]:
             return "BLOCKED"
 
@@ -249,24 +220,30 @@ def check_bookmaker_access(bookmaker):
         return "NOT_CHECKED"
 
     except requests.exceptions.Timeout:
+
         print(
             f"{bookmaker}: timeout",
             flush=True
         )
+
         return "TIMEOUT"
 
     except requests.exceptions.RequestException as e:
+
         print(
             f"{bookmaker}: {e}",
             flush=True
         )
+
         return "ERROR"
 
     except Exception as e:
+
         print(
             f"{bookmaker}: unexpected error: {e}",
             flush=True
         )
+
         return "ERROR"
 
 
@@ -276,14 +253,16 @@ def check_all_bookmakers():
 
     for bookmaker in TARGET_BOOKMAKERS:
 
-        status = check_bookmaker_access(bookmaker)
+        status = check_bookmaker_access(
+            bookmaker
+        )
 
         results[bookmaker] = status
 
-        # إذا وجد CAPTCHA، ننتقل مباشرة للمنصة التالية
         if status == "CAPTCHA":
+
             print(
-                f"🚫 {bookmaker}: CAPTCHA detected - skipped",
+                f"CAPTCHA: {bookmaker} - skipped",
                 flush=True
             )
 
@@ -293,7 +272,7 @@ def check_all_bookmakers():
 
 
 # =========================================================
-# BOOKMAKER DISPLAY
+# BOOKMAKER STATUS
 # =========================================================
 
 def bookmaker_status_icon(status):
@@ -333,7 +312,9 @@ def format_and_send_alert(
     status_type
 ):
 
-    current_time = datetime.now().strftime("%H:%M:%S")
+    current_time = datetime.now().strftime(
+        "%H:%M:%S"
+    )
 
     if status_type == "FT":
 
@@ -370,8 +351,8 @@ def format_and_send_alert(
         f"⏰ وقت التحديث: {current_time}\n\n"
         f"🛑 حالة كووورة:\n"
         f"{status_text}\n\n"
-        f"📊 حالة الوصول إلى المنصات:\n"
-        f"(الوصول للصفحة لا يعني أن الرهان ما زال مفتوحاً)\n\n"
+        "📊 حالة الوصول إلى المنصات:\n"
+        "(الوصول للصفحة لا يعني أن الرهان ما زال مفتوحاً)\n\n"
     )
 
     accessible = 0
@@ -386,22 +367,28 @@ def format_and_send_alert(
             "NOT_CHECKED"
         )
 
-        icon = bookmaker_status_icon(status)
+        icon = bookmaker_status_icon(
+            status
+        )
 
         message += (
             f"• {bookmaker}: {icon}\n"
         )
 
         if status == "ACCESSIBLE":
+
             accessible += 1
 
         elif status == "CAPTCHA":
+
             captcha += 1
 
         elif status == "BLOCKED":
+
             blocked += 1
 
         else:
+
             other += 1
 
     message += (
@@ -412,16 +399,653 @@ def format_and_send_alert(
         f"🔴 محظورة: {blocked}\n"
         f"⚪ أخرى/غير متحقق: {other}\n\n"
         "ℹ️ المنصات التي يظهر فيها CAPTCHA "
-        "تم استبعادها تلقائياً من الفحص.\n"
+        "تم استبعادها تلقائياً.\n"
         "ℹ️ لا يتم تجاوز CAPTCHA أو تسجيل الدخول "
         "أو تنفيذ أي رهان تلقائياً."
     )
 
-    send_telegram_message(message)
+    send_telegram_message(
+        message
+    )
 
 
 # =========================================================
-# KOOORA PARSER
+# TEXT HELPERS
+# =========================================================
+
+def normalize_space(text):
+
+    if not text:
+        return ""
+
+    text = text.replace(
+        "\xa0",
+        " "
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
+
+
+def clean_text(text):
+
+    if not text:
+        return ""
+
+    text = text.replace(
+        "\\u00a0",
+        " "
+    )
+
+    text = text.replace(
+        "\\/",
+        "/"
+    )
+
+    return normalize_space(
+        text
+    )
+
+
+# =========================================================
+# DETECT FT / HT
+# =========================================================
+
+def detect_status(text):
+
+    text = clean_text(text)
+
+    ft_patterns = [
+
+        r"\bFT\b",
+
+        r"\bFULL[\s_-]*TIME\b",
+
+        r"انتهت المباراة",
+
+        r"انتهت",
+
+        r"نهاية المباراة",
+
+        r"نهايه المباراة",
+
+        r"المباراة انتهت"
+    ]
+
+    for pattern in ft_patterns:
+
+        if re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE
+        ):
+
+            return "FT"
+
+    ht_patterns = [
+
+        r"\bHT\b",
+
+        r"\bHALF[\s_-]*TIME\b",
+
+        r"الشوط الأول",
+
+        r"الشوط الاول",
+
+        r"نهاية الشوط",
+
+        r"نهايه الشوط",
+
+        r"بين الشوطين"
+    ]
+
+    for pattern in ht_patterns:
+
+        if re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE
+        ):
+
+            return "HT"
+
+    return None
+
+
+# =========================================================
+# EXTRACT MATCH NAME
+# =========================================================
+
+def extract_match_name(text):
+
+    text = clean_text(text)
+
+    if not text:
+        return "مباراة مرصودة"
+
+    cleaned = re.sub(
+        r"\b(FT|HT|FULL[\s_-]*TIME|HALF[\s_-]*TIME)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    cleaned = re.sub(
+        r"(انتهت المباراة|نهاية المباراة|"
+        r"نهاية الشوط|نهايه المباراة|نهايه الشوط)",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE
+    )
+
+    cleaned = normalize_space(
+        cleaned
+    )
+
+    separators = [
+
+        r"\s+[-–—]\s+",
+
+        r"\s+vs\.?\s+",
+
+        r"\s+v\s+",
+
+        r"\s+×\s+"
+    ]
+
+    for pattern in separators:
+
+        parts = re.split(
+            pattern,
+            cleaned,
+            maxsplit=1,
+            flags=re.IGNORECASE
+        )
+
+        if len(parts) == 2:
+
+            left = re.sub(
+                r"\b\d+\s*[:\-]\s*\d+\b",
+                "",
+                parts[0]
+            )
+
+            right = re.sub(
+                r"\b\d+\s*[:\-]\s*\d+\b",
+                "",
+                parts[1]
+            )
+
+            left = normalize_space(left)
+            right = normalize_space(right)
+
+            if (
+                len(left) >= 2
+                and len(right) >= 2
+            ):
+
+                return (
+                    f"{left[:80]} vs "
+                    f"{right[:80]}"
+                )
+
+    fallback = re.sub(
+        r"\b\d+\s*[:\-]\s*\d+\b",
+        " ",
+        cleaned
+    )
+
+    ignored = {
+        "انتهت",
+        "FT",
+        "HT",
+        "FULL",
+        "TIME",
+        "HALF",
+        "الشوط",
+        "الأول",
+        "الاول",
+        "المباراة",
+        "البطولة",
+        "الدوري",
+        "دوري",
+        "كأس",
+        "بطولة",
+        "نهاية",
+        "نهايه"
+    }
+
+    words = []
+
+    for word in fallback.split():
+
+        word = word.strip(
+            " |,;:()[]{}<>"
+        )
+
+        if len(word) < 2:
+            continue
+
+        if word.isdigit():
+            continue
+
+        if word in ignored:
+            continue
+
+        words.append(word)
+
+    if len(words) >= 2:
+
+        return (
+            f"{words[0]} vs "
+            f"{words[1]}"
+        )
+
+    return "مباراة مرصودة"
+
+
+# =========================================================
+# LEAGUE
+# =========================================================
+
+def extract_league(
+    text,
+    default="الدوري العام"
+):
+
+    text = clean_text(
+        text
+    )
+
+    patterns = [
+
+        r"(?:البطولة|الدوري)\s*[:\-]\s*([^|]{3,80})",
+
+        r"(الدوري[^|]{2,80})",
+
+        r"(كأس[^|]{2,80})",
+
+        r"(بطولة[^|]{2,80})"
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text
+        )
+
+        if match:
+
+            value = normalize_space(
+                match.group(1)
+            )
+
+            value = value.strip(
+                " -|,"
+            )
+
+            if len(value) >= 3:
+
+                return value[:80]
+
+    return default
+
+
+# =========================================================
+# DOM CANDIDATES
+# =========================================================
+
+def is_reasonable_match_container(
+    element
+):
+
+    if element is None:
+        return False
+
+    text = clean_text(
+        element.get_text(
+            " ",
+            strip=True
+        )
+    )
+
+    if len(text) < 4:
+        return False
+
+    if detect_status(text):
+        return True
+
+    if re.search(
+        r"\b\d+\s*[:\-]\s*\d+\b",
+        text
+    ):
+        return True
+
+    if re.search(
+        r"\s[-–—]\s",
+        text
+    ):
+        return True
+
+    return False
+
+
+def find_dom_match_candidates(
+    soup
+):
+
+    candidates = []
+
+    # الطريقة الأولى: الجداول
+    for element in soup.find_all(
+        "tr"
+    ):
+
+        if is_reasonable_match_container(
+            element
+        ):
+
+            candidates.append(
+                element
+            )
+
+    # الطريقة الثانية:
+    # أسماء الكلاسات المحتملة
+    keywords = [
+
+        "match",
+        "matches",
+        "game",
+        "games",
+        "fixture",
+        "fixtures",
+        "event",
+        "events",
+        "score",
+        "result",
+        "item"
+    ]
+
+    for element in soup.find_all(
+        [
+            "div",
+            "li",
+            "article",
+            "section"
+        ]
+    ):
+
+        classes = " ".join(
+            element.get(
+                "class",
+                []
+            )
+        )
+
+        element_id = str(
+            element.get(
+                "id",
+                ""
+            )
+        )
+
+        haystack = (
+            f"{classes} {element_id}"
+        ).lower()
+
+        if any(
+            keyword in haystack
+            for keyword in keywords
+        ):
+
+            if is_reasonable_match_container(
+                element
+            ):
+
+                candidates.append(
+                    element
+                )
+
+    # إزالة التكرار
+    unique = []
+    seen = set()
+
+    for element in candidates:
+
+        text = clean_text(
+            element.get_text(
+                " ",
+                strip=True
+            )
+        )
+
+        key = text[:500]
+
+        if not text:
+            continue
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        unique.append(
+            element
+        )
+
+    return unique
+
+
+# =========================================================
+# JSON / SCRIPT SEARCH
+# =========================================================
+
+def walk_json_for_match_strings(
+    value,
+    results
+):
+
+    if isinstance(
+        value,
+        dict
+    ):
+
+        for key, child in value.items():
+
+            if isinstance(
+                child,
+                str
+            ):
+
+                text = clean_text(
+                    child
+                )
+
+                if detect_status(
+                    text
+                ):
+
+                    results.append(
+                        text
+                    )
+
+            else:
+
+                walk_json_for_match_strings(
+                    child,
+                    results
+                )
+
+    elif isinstance(
+        value,
+        list
+    ):
+
+        for child in value:
+
+            walk_json_for_match_strings(
+                child,
+                results
+            )
+
+
+def extract_script_candidates(
+    soup
+):
+
+    candidates = []
+
+    for script in soup.find_all(
+        "script"
+    ):
+
+        raw = (
+            script.string
+            or script.get_text()
+        )
+
+        if not raw:
+            continue
+
+        raw = raw.strip()
+
+        if len(raw) < 10:
+            continue
+
+        script_type = str(
+            script.get(
+                "type",
+                ""
+            )
+        ).lower()
+
+        if "json" in script_type:
+
+            try:
+
+                data = json.loads(
+                    raw
+                )
+
+                found = []
+
+                walk_json_for_match_strings(
+                    data,
+                    found
+                )
+
+                candidates.extend(
+                    found
+                )
+
+            except Exception:
+                pass
+
+        # البحث داخل JavaScript
+        if re.search(
+            r"\b(?:FT|HT)\b|"
+            r"انتهت|"
+            r"الشوط الأول|"
+            r"الشوط الاول",
+            raw,
+            flags=re.IGNORECASE
+        ):
+
+            for match in re.finditer(
+                r"\b(?:FT|HT)\b|"
+                r"انتهت|"
+                r"الشوط الأول|"
+                r"الشوط الاول",
+                raw,
+                flags=re.IGNORECASE
+            ):
+
+                start = max(
+                    0,
+                    match.start() - 350
+                )
+
+                end = min(
+                    len(raw),
+                    match.end() + 350
+                )
+
+                fragment = clean_text(
+                    raw[start:end]
+                )
+
+                if fragment:
+                    candidates.append(
+                        fragment
+                    )
+
+    return candidates
+
+
+# =========================================================
+# RAW TEXT FALLBACK
+# =========================================================
+
+def extract_raw_text_candidates(
+    soup
+):
+
+    page_text = clean_text(
+        soup.get_text(
+            " ",
+            strip=True
+        )
+    )
+
+    candidates = []
+
+    pattern = (
+        r"\bFT\b|"
+        r"\bHT\b|"
+        r"انتهت المباراة|"
+        r"انتهت|"
+        r"الشوط الأول|"
+        r"الشوط الاول|"
+        r"نهاية المباراة|"
+        r"نهاية الشوط"
+    )
+
+    for match in re.finditer(
+        pattern,
+        page_text,
+        flags=re.IGNORECASE
+    ):
+
+        start = max(
+            0,
+            match.start() - 180
+        )
+
+        end = min(
+            len(page_text),
+            match.end() + 180
+        )
+
+        fragment = page_text[
+            start:end
+        ]
+
+        if fragment:
+            candidates.append(
+                fragment
+            )
+
+    return candidates
+
+
+# =========================================================
+# GET KOOORA
 # =========================================================
 
 def get_kooora_page():
@@ -433,7 +1057,8 @@ def get_kooora_page():
             response = requests.get(
                 url,
                 headers=KOOORA_HEADERS,
-                timeout=20
+                timeout=20,
+                allow_redirects=True
             )
 
             print(
@@ -443,6 +1068,19 @@ def get_kooora_page():
             )
 
             if response.status_code == 200:
+
+                print(
+                    f"Kooora final URL: "
+                    f"{response.url}",
+                    flush=True
+                )
+
+                print(
+                    f"Kooora HTML length: "
+                    f"{len(response.text)}",
+                    flush=True
+                )
+
                 return response
 
         except Exception as e:
@@ -455,69 +1093,92 @@ def get_kooora_page():
     return None
 
 
-def extract_match_name(text):
+# =========================================================
+# PROCESS MATCH
+# =========================================================
 
-    # إزالة بعض الكلمات غير المفيدة
-    ignored = {
-        "انتهت",
-        "FT",
-        "HT",
-        "الشوط",
-        "الأول",
-        "المباراة",
-        "البطولة",
-        "الدوري",
-        "كأس",
-        "بطولة"
-    }
+def process_candidate_text(
+    text,
+    country,
+    league,
+    seen_candidates
+):
 
-    words = []
+    text = clean_text(
+        text
+    )
 
-    for word in text.split():
+    if not text:
+        return 0
 
-        clean = word.strip()
+    status = detect_status(
+        text
+    )
 
-        if len(clean) < 2:
-            continue
+    if not status:
+        return 0
 
-        if clean in ignored:
-            continue
+    match_name = extract_match_name(
+        text
+    )
 
-        # تجاهل بعض الأرقام
-        if clean.isdigit():
-            continue
-
-        words.append(clean)
-
-    if len(words) >= 2:
-
-        return (
-            f"{words[0]} vs {words[1]}"
+    if (
+        match_name == "مباراة مرصودة"
+        and not re.search(
+            r"\s[-–—]\s|"
+            r"\bvs\.?\b|"
+            r"\b\d+\s*[:\-]\s*\d+\b",
+            text,
+            flags=re.IGNORECASE
         )
-
-    return "مباراة مرصودة"
-
-
-def detect_status(text):
-
-    upper_text = text.upper()
-
-    # FT
-    if (
-        "انتهت" in text
-        or "FT" in upper_text
     ):
-        return "FT"
 
-    # HT
-    if (
-        "الشوط الأول" in text
-        or "HT" in upper_text
-    ):
-        return "HT"
+        return 0
 
-    return None
+    league = extract_league(
+        text,
+        league
+    )
 
+    match_id = (
+        f"{match_name}|"
+        f"{league}|"
+        f"{status}"
+    )
+
+    if match_id in seen_candidates:
+        return 0
+
+    if match_id in sent_alerts:
+        return 0
+
+    seen_candidates.add(
+        match_id
+    )
+
+    print(
+        f"🚨 Detected: "
+        f"{match_name} - {status}",
+        flush=True
+    )
+
+    format_and_send_alert(
+        match_name,
+        country,
+        league,
+        status
+    )
+
+    sent_alerts.add(
+        match_id
+    )
+
+    return 1
+
+
+# =========================================================
+# CHECK KOOORA
+# =========================================================
 
 def check_kooora_matches():
 
@@ -526,7 +1187,7 @@ def check_kooora_matches():
     if response is None:
 
         print(
-            "❌ Unable to access Kooora",
+            "Unable to access Kooora",
             flush=True
         )
 
@@ -539,113 +1200,208 @@ def check_kooora_matches():
             "html.parser"
         )
 
-        current_league = "الدوري العام"
-        current_country = "الدولي / محلي"
+        if soup.title:
 
-        # محاولة قراءة الصفوف
-        matches = soup.find_all("tr")
-
-        # إذا لم نجد tr، نجرب عناصر match
-        if not matches:
-
-            matches = soup.find_all(
-                "div",
-                class_="match"
-            )
-
-        print(
-            f"Kooora elements found: {len(matches)}",
-            flush=True
-        )
-
-        for match in matches:
-
-            text = match.get_text(
-                separator=" ",
+            title = soup.title.get_text(
+                " ",
                 strip=True
             )
 
-            if not text:
-                continue
+        else:
 
-            # -----------------------------------------
-            # البطولة
-            # -----------------------------------------
+            title = "NO TITLE"
 
-            if (
-                "الدوري" in text
-                or "دوري" in text
-                or "كأس" in text
-                or "بطولة" in text
-            ):
+        print(
+            f"Kooora title: {title[:200]}",
+            flush=True
+        )
 
-                parts = [
-                    p.strip()
-                    for p in text.split("-")
-                    if len(p.strip()) > 3
-                ]
+        league = "الدوري العام"
+        country = "الدولي / محلي"
 
-                if parts:
+        seen_candidates = set()
 
-                    current_league = (
-                        parts[0][:60]
-                    )
+        total_alerts = 0
 
-            # -----------------------------------------
-            # الحالة
-            # -----------------------------------------
+        # -------------------------------------------------
+        # METHOD 1: DOM
+        # -------------------------------------------------
 
-            status_detected = detect_status(text)
+        dom_candidates = (
+            find_dom_match_candidates(
+                soup
+            )
+        )
 
-            if not status_detected:
-                continue
+        print(
+            f"Kooora DOM candidates: "
+            f"{len(dom_candidates)}",
+            flush=True
+        )
 
-            # -----------------------------------------
-            # اسم المباراة
-            # -----------------------------------------
+        for element in dom_candidates:
 
-            match_name = extract_match_name(text)
-
-            # -----------------------------------------
-            # ID ثابت قدر الإمكان
-            # -----------------------------------------
-
-            match_id = (
-                f"{match_name}|"
-                f"{current_league}|"
-                f"{status_detected}"
+            text = element.get_text(
+                " ",
+                strip=True
             )
 
-            if match_id in sent_alerts:
-                continue
+            total_alerts += (
+                process_candidate_text(
+                    text,
+                    country,
+                    league,
+                    seen_candidates
+                )
+            )
+
+        # -------------------------------------------------
+        # METHOD 2: SCRIPTS
+        # -------------------------------------------------
+
+        script_candidates = (
+            extract_script_candidates(
+                soup
+            )
+        )
+
+        print(
+            f"Kooora script candidates: "
+            f"{len(script_candidates)}",
+            flush=True
+        )
+
+        for text in script_candidates:
+
+            total_alerts += (
+                process_candidate_text(
+                    text,
+                    country,
+                    league,
+                    seen_candidates
+                )
+            )
+
+        # -------------------------------------------------
+        # METHOD 3: RAW TEXT
+        # -------------------------------------------------
+
+        if (
+            len(dom_candidates) == 0
+            and len(script_candidates) == 0
+        ):
+
+            raw_candidates = (
+                extract_raw_text_candidates(
+                    soup
+                )
+            )
 
             print(
-                f"🚨 Detected: "
-                f"{match_name} - "
-                f"{status_detected}",
+                f"Kooora raw-text candidates: "
+                f"{len(raw_candidates)}",
                 flush=True
             )
 
-            # إرسال التنبيه
-            format_and_send_alert(
-                match_name,
-                current_country,
-                current_league,
-                status_detected
+            for text in raw_candidates:
+
+                total_alerts += (
+                    process_candidate_text(
+                        text,
+                        country,
+                        league,
+                        seen_candidates
+                    )
+                )
+
+        # -------------------------------------------------
+        # DIAGNOSTICS
+        # -------------------------------------------------
+
+        if (
+            len(dom_candidates) == 0
+            and len(script_candidates) == 0
+        ):
+
+            page_text = clean_text(
+                soup.get_text(
+                    " ",
+                    strip=True
+                )
             )
 
-            sent_alerts.add(match_id)
+            print(
+                f"Kooora visible text length: "
+                f"{len(page_text)}",
+                flush=True
+            )
 
-            # منع نمو الذاكرة بلا حدود
-            if len(sent_alerts) > 1000:
+            if page_text:
 
-                # الاحتفاظ بآخر جزء فقط
-                sent_alerts.clear()
+                print(
+                    f"Kooora text sample: "
+                    f"{page_text[:1200]}",
+                    flush=True
+                )
+
+            else:
+
+                print(
+                    "Kooora page has no visible text.",
+                    flush=True
+                )
+
+            html_lower = (
+                response.text.lower()
+            )
+
+            interesting_words = [
+                "match",
+                "fixture",
+                "event",
+                "score",
+                "football",
+                "kooora",
+                "captcha",
+                "cloudflare",
+                "javascript"
+            ]
+
+            found_words = [
+                word
+                for word in interesting_words
+                if word in html_lower
+            ]
+
+            print(
+                "Kooora HTML keywords: "
+                + (
+                    ", ".join(found_words)
+                    if found_words
+                    else "none"
+                ),
+                flush=True
+            )
+
+        print(
+            f"Kooora scan finished. "
+            f"Alerts generated: {total_alerts}",
+            flush=True
+        )
+
+        if len(sent_alerts) > 1000:
+
+            sent_alerts.clear()
+
+            print(
+                "sent_alerts cleared",
+                flush=True
+            )
 
     except Exception as e:
 
         print(
-            f"❌ Error scraping Kooora: {e}",
+            f"Error scraping Kooora: {e}",
             flush=True
         )
 
@@ -657,7 +1413,7 @@ def check_kooora_matches():
 def bot_loop():
 
     print(
-        "🚀 BOT LOOP STARTED",
+        "BOT LOOP STARTED",
         flush=True
     )
 
@@ -675,7 +1431,7 @@ def bot_loop():
     )
 
     print(
-        "📨 Sending Telegram startup message...",
+        "Sending Telegram startup message...",
         flush=True
     )
 
@@ -684,7 +1440,7 @@ def bot_loop():
     )
 
     print(
-        "✅ Startup message finished",
+        "Startup message finished",
         flush=True
     )
 
@@ -698,19 +1454,19 @@ def bot_loop():
             )
 
             print(
-                "🔍 Checking Kooora...",
+                "Checking Kooora...",
                 flush=True
             )
 
             check_kooora_matches()
 
             print(
-                "✅ Kooora check finished",
+                "Kooora check finished",
                 flush=True
             )
 
             print(
-                "⏳ Next check in 60 seconds...",
+                "Next check in 60 seconds...",
                 flush=True
             )
 
@@ -722,15 +1478,17 @@ def bot_loop():
         except Exception as e:
 
             print(
-                f"❌ Bot loop error: {e}",
+                f"Bot loop error: {e}",
                 flush=True
             )
 
-        time.sleep(60)
+        time.sleep(
+            60
+        )
 
 
 # =========================================================
-# START BOT
+# START
 # =========================================================
 
 bot_thread = threading.Thread(
