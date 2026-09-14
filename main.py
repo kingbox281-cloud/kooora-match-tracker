@@ -64,23 +64,23 @@ def send_telegram_alert(country, league_name, match_name, match_score, kooora_st
     except Exception as e:
         print(f"❌ خطأ في إرسال التنبيه عبر تيليجرام: {e}")
 
+def send_test_message():
+    """إرسال رسالة تجريبية فورية للتأكد من ربط التيليجرام بنجاح"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": "🤖 *تم تشغيل بوت مراقبة فجوات كووورة بنجاح والاتصال يعمل تماماً!*",
+        "parse_mode": "Markdown"
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+        print("✅ تم إرسال رسالة الاختبار بنجاح إلى تيليجرام.")
+    except Exception as e:
+        print(f"❌ فشل إرسال رسالة الاختبار: {e}")
+
 def fetch_kooora_matches_today():
     """
     دالة جلب وتجميع المباريات الحقيقية من كووورة والمنصات.
-    يجب أن تعيد هذه الدالة قائمة من القواميس (List of Dicts) بالهيكل التالي:
-    [
-       {
-           "country": "اسم الدولة",
-           "league": "اسم البطولة/الدوري",
-           "name": "اسم الفريقين (مثلاً: بايرن ميونخ vs دورتموند)",
-           "score": "النتيجة النهائية (مثلاً: 3 - 1)",
-           "status": "حالة المباراة الحقيقية من كووورة (مثل FT)",
-           "platforms_status": {
-               "Merkur Bets": "Pre-match أو Closed",
-               ... وباقي المنصات الـ 18
-           }
-       }
-    ]
     """
     matches_list = []
     
@@ -96,6 +96,9 @@ def fetch_kooora_matches_today():
 def run_arbitrage_bot():
     """حلقة العمل الرئيسية التي تعمل بلا توقف 24/7 لمراقبة السوق"""
     print("🤖 بدأ تشغيل بوت مراقبة فجوات كووورة بنجاح...")
+    
+    # إرسال رسالة تجريبية عند الإقلاع للتأكد من التيليجرام
+    send_test_message()
     
     while True:
         try:
