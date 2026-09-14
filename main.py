@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import requests
+import re
 from datetime import datetime
 from flask import Flask
 from bs4 import BeautifulSoup
@@ -136,20 +137,20 @@ def check_kooora_matches():
 
                     upper_text = text.upper()
                     
-                    # التركيز حصرياً على المباريات التي انتهت (FT)
+                    # التركيز على المباريات التي انتهت (FT)
                     if "انتهت" in text or "FT" in upper_text:
-                        match_name = "مباراة مرصودة"
-                        score_detected = "غير متوفرة"
+                        # تنظيف النص واستخراج النتيجة وأسماء الفرق بدقة أكبر
+                        clean_text = re.sub(r'\s+', ' ', text)
                         
-                        words = [w.strip() for w in text.split() if len(w.strip()) > 0 and w.strip() not in ["انتهت", "FT"]]
-                        if len(words) >= 2:
-                            match_name = f"{words[0]} vs {words[1]}"
-                        
-                        # محاولة استخراج النتيجة من النص إذا وجدت أرقام مفصولة بشرطة
-                        for word in text.split():
-                            if "-" in word and any(char.isdigit() for char in word):
-                                score_detected = word
-                                break
+                        # محاولة البحث عن نمط النتيجة (مثل 2 - 1 أو 3-0)
+                        score_match = re.search(r'(\d+\s*-\s*\d+)', clean_text)
+                        score_detected = score_match.group(1) if score_match else "غير متوفرة"
+
+                        # استخراج اسم المباراة بشكل أفضل (إزالة كلمات الحالة والنتيجة)
+                        match_name = clean_text.replace("انتهت", "").replace("FT", "").replace(score_detected, "")
+                        match_name = " ".join([w for w in match_name.split() if len(w) > 1])[:60]
+                        if not match_name.strip():
+                            match_name = "مباراة مرصودة"
 
                         match_id = f"{match_name}|FT|{score_detected}"
                         if match_id not in sent_alerts:
@@ -181,13 +182,12 @@ def check_kooora_matches():
             pass
 
 def bot_loop():
-    send_telegram_message("🚀 تم تشغيل بوت رصد فجوات النتيجة (انتهت vs لم تبدأ) بنجاح 24/7!")
+    send_telegram_message("🚀 تم تحديث وتشغيل بوت رصد الفجوات والنتيجة بنجاح 24/7!")
     while True:
         try:
             check_kooora_matches()
         except Exception:
             pass
-        # الفحص كل 20 ثانية
         time.sleep(20)
 
 bot_thread = threading.Thread(target=bot_loop, daemon=True)
