@@ -2,665 +2,875 @@ import os
 import re
 import time
 import threading
+import unicodedata
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote
 
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask
 
-# =========================================================
-# SETTINGS
-# =========================================================
+# Playwright is optional at import time so the web server can still start
+# if the browser package is not installed. For real bookmaker JS checks,
+# install playwright and Chromium in the Render build command.
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+    PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    PLAYWRIGHT_AVAILABLE = False
 
-SCAN_INTERVAL = 60
-KOOORA_TIMEOUT = 20
-BOOKMAKER_TIMEOUT = 10
-MAX_BOOKMAKER_WORKERS = 6
 
-# =========================================================
+# ============================================================
+# CONFIG
+# ============================================================
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+KOOORA_URL = "https://www.kooora.com/كرة القدم/مباريات-اليوم"
+KOOORA_FALLBACK_URL = "https://www.kooora.com/default.aspx?g=matches"
+
+SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "60"))
+BROWSER_TIMEOUT_MS = int(os.getenv("BROWSER_TIMEOUT_MS", "20000"))
+BROWSER_WAIT_MS = int(os.getenv("BROWSER_WAIT_MS", "5000"))
+MAX_BROWSER_WORKERS = int(os.getenv("MAX_BROWSER_WORKERS", "3"))
+
+BOOKMAKERS = [
+    ("Tipico", "https://www.tipico.de/"),
+    ("Tipwin", "https://www.tipwin.de/"),
+    ("Merkur Bets", "https://www.merkurbets.de/"),
+    ("sportwetten.de", "https://www.sportwetten.de/"),
+    ("NEO.bet", "https://neo.bet/de/"),
+    ("bet365", "https://www.bet365.com/"),
+    ("Winamax", "https://www.winamax.de/"),
+    ("bwin", "https://sports.bwin.de/"),
+    ("Betano", "https://www.betano.de/"),
+    ("Bet-at-home", "https://www.bet-at-home.com/"),
+    ("ODDSET", "https://www.oddset.de/"),
+    ("Interwetten", "https://www.interwetten.de/"),
+    ("DAZN Bet", "https://www.daznbet.de/"),
+    ("AdmiralBet", "https://www.admiralbet.de/"),
+    ("Betway", "https://betway.de/"),
+    ("LeoVegas", "https://www.leovegas.com/"),
+    ("VBET", "https://www.vbet.de/"),
+    ("Bet3000", "https://www.bet3000.com/"),
+]
+
+CAPTCHA_MARKERS = [
+    "captcha", "recaptcha", "hcaptcha", "verify you are human",
+    "verify human", "security check", "bot detection",
+    "access denied", "cloudflare", "unusual traffic",
+    "robot check", "are you a robot", "zugriff verweigert",
+]
+
+PREMATCH_MARKERS = [
+    "pre-match", "prematch", "pre match", "upcoming", "not started",
+    "not begun", "scheduled", "before the match", "match starts",
+    "starts in", "vor dem spiel", "noch nicht begonnen", "bevorstehend",
+    "kommende", "geplant", "spiel beginnt", "noch nicht gestartet",
+    "قبل المباراة", "لم تبدأ", "لم تبدأ بعد", "قادمة", "مجدولة",
+]
+
+POSTMATCH_MARKERS = [
+    "full time", "finished", "final", "ended", "completed",
+    "beendet", "abgeschlossen", "spiel beendet", "endstand",
+    "انتهت", "نهاية المباراة", "نهائي", "مكتملة",
+]
+
+ARABIC_DIACRITICS = re.compile(r"[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed]")
+NON_ALNUM = re.compile(r"[^a-z0-9\u0600-\u06ff]+", re.IGNORECASE)
+
+
+# ============================================================
 # FLASK
-# =========================================================
+# ============================================================
 
 app = Flask(__name__)
 
 
 @app.route("/")
 def home():
-    return "Bot is running and monitoring Kooora 24/7!"
+    return (
+        "Kooora Match Tracker is running. "
+        f"Browser/JS={'ON' if PLAYWRIGHT_AVAILABLE else 'OFF'}"
+    )
 
 
 @app.route("/health")
 def health():
-    return "OK"
+    return {
+        "ok": True,
+        "browser_js": PLAYWRIGHT_AVAILABLE,
+        "scan_seconds": SCAN_SECONDS,
+    }
 
 
-# =========================================================
+# ============================================================
+# HTTP SESSION
+# ============================================================
+
+session = requests.Session()
+session.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8,ar;q=0.7",
+})
+
+
+# ============================================================
+# TEXT / TEAM CLEANING
+# ============================================================
+
+def clean_text(value):
+    if value is None:
+        return ""
+    value = unicodedata.normalize("NFKC", str(value))
+    value = value.replace("\xa0", " ")
+    value = ARABIC_DIACRITICS.sub("", value)
+    value = value.replace("ـ", "")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def normalize_team(value):
+    """
+    Creates a stable comparison form without changing the displayed name.
+    Important: this removes repeated identical team names caused by Kooora
+    desktop/mobile/accessibility markup, e.g.:
+      'غازي عنتاب غازي عنتاب' -> 'غازي عنتاب'
+    """
+    value = clean_text(value)
+
+    # Remove common score/status fragments if they accidentally enter a name.
+    value = re.sub(r"\b(?:FT|HT|LIVE|RESULT|FIXTURE)\b", " ", value, flags=re.I)
+    value = re.sub(r"\b\d{1,2}\s*[-:]\s*\d{1,2}\b", " ", value)
+
+    # Remove obvious Kooora short team codes such as LIS / POR when they
+    # are separate uppercase tokens. Do not remove ordinary long names.
+    value = re.sub(r"\b[A-Z]{2,4}\b", " ", value)
+
+    value = clean_text(value)
+    if not value:
+        return ""
+
+    # Tokenize while retaining Arabic and Latin words.
+    tokens = re.findall(r"[a-z0-9\u0600-\u06ff]+", value.lower())
+
+    # Collapse an exact repeated sequence:
+    # A B A B -> A B
+    # A A -> A
+    # This handles the duplicated DOM/accessibility text seen in Kooora.
+    if len(tokens) >= 2:
+        half = len(tokens) // 2
+        if len(tokens) % 2 == 0 and tokens[:half] == tokens[half:]:
+            tokens = tokens[:half]
+
+    # Collapse adjacent duplicate tokens:
+    # 'shakhtar shakhtar' -> 'shakhtar'
+    collapsed = []
+    for token in tokens:
+        if not collapsed or token != collapsed[-1]:
+            collapsed.append(token)
+
+    return " ".join(collapsed)
+
+
+def display_team(value):
+    value = clean_text(value)
+    if not value:
+        return ""
+    return value
+
+
+def team_tokens(value):
+    norm = normalize_team(value)
+    return set(norm.split())
+
+
+def meaningful_tokens(value):
+    # Ignore tiny generic tokens that create false positives.
+    stop = {
+        "fc", "cf", "sc", "ac", "fk", "sk", "sv", "vfb", "tsv",
+        "u19", "u20", "u21", "ii", "b", "a",
+    }
+    return {t for t in team_tokens(value) if len(t) >= 3 and t not in stop}
+
+
+def team_match_score(source_name, bookmaker_text):
+    """
+    Conservative same-team score.
+    Returns 0..1. We intentionally require multiple meaningful tokens
+    for long names and exact normalized equality for short names.
+    """
+    a = normalize_team(source_name)
+    if not a:
+        return 0.0
+
+    b = clean_text(bookmaker_text).lower()
+    if not b:
+        return 0.0
+
+    b_norm = normalize_team(b)
+
+    if a == b_norm:
+        return 1.0
+
+    # Search the normalized team phrase in the bookmaker page text.
+    if len(a) >= 5 and a in b_norm:
+        return 0.95
+
+    tokens = meaningful_tokens(a)
+    if not tokens:
+        return 0.0
+
+    hits = sum(1 for token in tokens if token in b_norm)
+    ratio = hits / len(tokens)
+
+    if len(tokens) >= 3:
+        if ratio >= 0.8:
+            return 0.9
+        if ratio >= 0.6:
+            return 0.72
+    else:
+        if ratio == 1:
+            return 0.82
+
+    return 0.0
+
+
+def pair_match_score(home, away, bookmaker_text):
+    """
+    Both teams must be found. Order is accepted both ways because some
+    bookmaker displays can reverse home/away order in text.
+    """
+    text = clean_text(bookmaker_text).lower()
+    direct = min(
+        team_match_score(home, text),
+        team_match_score(away, text),
+    )
+
+    reverse = min(
+        team_match_score(away, text),
+        team_match_score(home, text),
+    )
+
+    return max(direct, reverse)
+
+
+# ============================================================
 # TELEGRAM
-# =========================================================
+# ============================================================
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-
-
-def send_telegram_message(message):
+def telegram_send(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram token/chat ID is not configured.", flush=True)
+        print("[TELEGRAM] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
     try:
-        response = requests.post(
+        response = session.post(
             url,
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "disable_web_page_preview": True,
+            },
             timeout=15,
         )
-        print(f"Telegram response: HTTP {response.status_code}", flush=True)
-        return response.ok
-    except requests.RequestException as exc:
-        print(f"Telegram error: {exc}", flush=True)
-        return False
+        if response.ok:
+            print("[TELEGRAM] Sent")
+            return True
+        print(f"[TELEGRAM] HTTP {response.status_code}: {response.text[:300]}")
+    except Exception as exc:
+        print(f"[TELEGRAM] ERROR: {exc}")
+    return False
 
 
-# =========================================================
-# HTTP SESSION / HEADERS
-# =========================================================
+# ============================================================
+# KOOORA
+# ============================================================
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/140.0.0.0 Safari/537.36"
-)
-
-KOOORA_URL = (
-    "https://www.kooora.com/"
-    "%D9%83%D8%B1%D8%A9-%D8%A7%D9%84%D9%82%D8%AF%D9%85/"
-    "%D9%85%D8%A8%D8%A7%D8%B1%D9%8A%D8%A7%D8%AA-%D8%A7%D9%84%D9%8A%D9%88%D9%85"
-)
-KOOORA_FALLBACK_URL = "https://www.kooora.com/default.aspx?g=matches"
-
-KOOORA_HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "ar,en;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Referer": "https://www.kooora.com/",
-}
-
-# =========================================================
-# BOOKMAKERS
-# =========================================================
-
-BOOKMAKER_URLS = {
-    "Tipico": "https://www.tipico.de/",
-    "Tipwin": "https://www.tipwin.de/",
-    "Merkur Bets": "https://www.merkurbets.de/",
-    "sportwetten.de": "https://www.sportwetten.de/",
-    "NEO.bet": "https://www.neo.bet/",
-    "bet365": "https://www.bet365.com/",
-    "Winamax": "https://www.winamax.de/",
-    "bwin": "https://www.bwin.de/",
-    "Betano": "https://www.betano.de/",
-    "Bet-at-home": "https://www.bet-at-home.com/",
-    "ODDSET": "https://www.oddset.de/",
-    "Interwetten": "https://www.interwetten.com/",
-    "DAZN Bet": "https://www.daznbet.de/",
-    "AdmiralBet": "https://www.admiralbet.de/",
-    "Betway": "https://betway.de/",
-    "LeoVegas": "https://www.leovegas.com/",
-    "VBET": "https://www.vbet.de/",
-    "Bet3000": "https://www.bet3000.com/",
-}
-
-TARGET_BOOKMAKERS = list(BOOKMAKER_URLS.keys())
-
-CAPTCHA_WORDS = (
-    "captcha",
-    "recaptcha",
-    "hcaptcha",
-    "verify you are human",
-    "verify that you are human",
-    "are you human",
-    "security check",
-    "bot detection",
-    "access denied",
-    "cloudflare",
-)
-
-PREMATCH_MARKERS = (
-    "pre-match",
-    "prematch",
-    "pre match",
-    "upcoming",
-    "not started",
-    "not begun",
-    "scheduled",
-    "before the match",
-    "match starts",
-    "starts in",
-    "vor dem spiel",
-    "nicht begonnen",
-    "noch nicht gestartet",
-    "bevorstehend",
-    "spielbeginn",
-    "لم تبدأ",
-    "لم تبدأ بعد",
-    "قبل المباراة",
-    "قبل بداية المباراة",
-    "قبل البداية",
-    "لم تبدأ المباراة",
-)
-
-POSTMATCH_MARKERS = (
-    "finished",
-    "full time",
-    "final",
-    "ended",
-    "completed",
-    "beendet",
-    "endstand",
-    "abgeschlossen",
-    "انتهت",
-    "النهاية",
-    "نهاية المباراة",
-    "مكتملة",
-)
-
-# =========================================================
-# TEXT / MATCH HELPERS
-# =========================================================
+def fetch_kooora_html():
+    for url in (KOOORA_URL, KOOORA_FALLBACK_URL):
+        try:
+            response = session.get(url, timeout=25)
+            print(
+                f"[KOOORA] HTTP {response.status_code} | "
+                f"URL={response.url} | HTML={len(response.text)}"
+            )
+            if response.ok and len(response.text) > 50000:
+                return response.text
+        except Exception as exc:
+            print(f"[KOOORA] ERROR {url}: {exc}")
+    return ""
 
 
-def clean_text(text):
-    if not text:
-        return ""
-    text = str(text).replace("\xa0", " ").replace("\\u00a0", " ")
-    text = text.replace("\\/", "/")
-    text = text.translate(str.maketrans(
-        "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
-        "01234567890123456789",
-    ))
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def normalize_match_text(text):
-    text = clean_text(text).lower()
-    text = re.sub(r"[\u064B-\u065F\u0670]", "", text)
-    text = (text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
-                .replace("ى", "ي").replace("ة", "ه").replace("ـ", ""))
-    text = re.sub(r"[|/\\:;,.()\[\]{}\-_–—]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def team_tokens(team):
-    ignored = {
-        "fc", "cf", "sc", "afc", "fk", "sv", "sk", "ac", "ks", "nk",
-        "bk", "cd", "ud", "rc", "ca", "ss", "as", "1", "2",
-    }
-    return {
-        token for token in normalize_match_text(team).split()
-        if token not in ignored and len(token) >= 2
-    }
-
-
-def token_present(haystack, token):
-    return re.search(rf"(?<![\w\u0600-\u06FF]){re.escape(token)}(?![\w\u0600-\u06FF])", haystack) is not None
-
-
-def team_is_in_text(team, text):
-    exact = normalize_match_text(team)
-    haystack = normalize_match_text(text)
-    if not exact or not haystack:
-        return False
-
-    # Strongest match: complete normalized team name as a word-safe phrase.
-    if re.search(
-        rf"(?<![\w\u0600-\u06FF]){re.escape(exact)}(?![\w\u0600-\u06FF])",
-        haystack,
-    ):
-        return True
-
-    tokens = team_tokens(team)
-    if not tokens:
-        return False
-
-    present = sum(token_present(haystack, token) for token in tokens)
-    if len(tokens) == 1:
-        return present == 1
-    if len(tokens) == 2:
-        return present == 2
-    return present >= max(2, (len(tokens) + 1) // 2)
-
-
-def teams_match(container_text, team1, team2):
-    if not team_is_in_text(team1, container_text):
-        return False
-    if not team_is_in_text(team2, container_text):
-        return False
-    return True
-
-
-def has_prematch_marker(text):
-    normalized = normalize_match_text(text)
-    return any(normalize_match_text(marker) in normalized for marker in PREMATCH_MARKERS)
-
-
-def has_postmatch_marker(text):
-    normalized = normalize_match_text(text)
-    return any(normalize_match_text(marker) in normalized for marker in POSTMATCH_MARKERS)
-
-
-def detect_captcha(response):
-    try:
-        text = (response.text or "").lower()
-    except Exception:
-        text = ""
-    return any(word in text for word in CAPTCHA_WORDS)
-
-# =========================================================
-# KOOORA PARSING
-# =========================================================
-
-FT_RE = re.compile(r"انتهت|إنتهت|النهاية|نهاية المباراة|\bFT\b|FULL[\s_-]*TIME", re.I)
-HT_RE = re.compile(r"استراحة|نهاية الشوط|الشوط الأول|الشوط الاول|بين الشوطين|\bHT\b|HALF[\s_-]*TIME", re.I)
-SINGLE_SCORE_RE = re.compile(r"(?<!\d)(\d{1,2})(?!\d)")
-
-
-def extract_competition_context(match_element):
-    result = {"country": "الدولي / محلي", "league": "الدوري العام", "round": None}
-    parent = match_element.parent
-    section = None
-
-    for _ in range(10):
-        if parent is None:
-            break
-        classes = " ".join(parent.get("class", []))
-        if "match-list_livescores-match-list__section" in classes:
-            section = parent
-            break
-        parent = parent.parent
-
-    if section is None:
-        return result
-
-    text = clean_text(section.get_text(" ", strip=True))
-    round_match = re.search(r"الجولة\s*[:\-]?\s*(\d+)", text, re.I)
-    if round_match:
-        result["round"] = f"الجولة {round_match.group(1)}"
-        prefix = text[:round_match.start()].strip()
-    else:
-        prefix = text
-
-    countries = [
-        "جنوب أفريقيا", "كوريا الجنوبية", "ساحل العاج", "نيجيريا", "اليابان",
-        "جورجيا", "إيطاليا", "إسبانيا", "ألمانيا", "فرنسا", "إنجلترا",
-        "هولندا", "بلجيكا", "البرتغال", "البرازيل", "الأرجنتين", "المكسيك",
-        "أمريكا", "مصر", "العراق", "السعودية", "الإمارات", "قطر", "الكويت",
-        "البحرين", "الأردن", "المغرب", "الجزائر", "تونس", "ليبيا", "سوريا",
-        "لبنان", "فلسطين", "تركيا", "الصين", "أستراليا", "الهند", "غانا",
-        "السنغال", "الكاميرون", "مالي", "زامبيا", "تنزانيا", "أوغندا", "كينيا",
+def extract_score_from_text(text):
+    text = clean_text(text)
+    # Prefer common score forms first.
+    patterns = [
+        r"(?<!\d)(\d{1,2})\s*[-:]\s*(\d{1,2})(?!\d)",
+        r"(?<!\d)(\d{1,2})\s+(\d{1,2})(?!\d)",
     ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            a, b = int(match.group(1)), int(match.group(2))
+            if a <= 30 and b <= 30:
+                return a, b
+    return None
 
-    for country in sorted(countries, key=len, reverse=True):
-        if country in prefix:
-            result["country"] = country
-            league = prefix.replace(country, "").strip()
-            if league:
-                result["league"] = league
-            return result
 
-    if prefix:
-        result["league"] = prefix
+def unique_strings(values):
+    result = []
+    seen = set()
+    for value in values:
+        key = normalize_team(value)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(display_team(value))
     return result
 
 
-def parse_kooora_match_element(match_element):
-    data_status = str(match_element.get("data-match-status", "")).upper().strip()
-    if data_status not in {"RESULT", "LIVE"}:
-        return None
+def extract_team_names_from_card(card, score):
+    """
+    Extracts candidate team names around the first score occurrence.
+    The candidate list is then cleaned/deduplicated. This is deliberately
+    conservative; if the DOM has several representations, the shortest
+    useful unique candidate is preferred.
+    """
+    full = clean_text(card.get_text(" ", strip=True))
+    score_text = f"{score[0]} - {score[1]}"
 
-    status_element = match_element.select_one(".fco-match-status")
-    status_text = clean_text(status_element.get_text(" ", strip=True) if status_element else "")
-
-    if data_status == "RESULT":
-        status = "FT"
-    elif HT_RE.search(status_text):
-        status = "HT"
+    before, after = full, ""
+    pos = full.find(score_text)
+    if pos >= 0:
+        before = full[:pos]
+        after = full[pos + len(score_text):]
     else:
-        return None
+        # Try compact score.
+        compact = f"{score[0]}:{score[1]}"
+        pos = full.find(compact)
+        if pos >= 0:
+            before = full[:pos]
+            after = full[pos + len(compact):]
 
-    basic = match_element.select_one(".fco-match-basic-data")
-    if basic is None:
-        return None
-    basic_text = clean_text(basic.get_text(" ", strip=True))
-    numbers = list(SINGLE_SCORE_RE.finditer(basic_text))
-    if len(numbers) < 2:
-        return None
+    def candidates(part):
+        part = clean_text(part)
+        part = re.sub(
+            r"(?:FT|HT|LIVE|RESULT|FIXTURE|HALF TIME|FULL TIME|"
+            r"الشوط الأول|نهاية المباراة|انتهت).*?$",
+            "",
+            part,
+            flags=re.I,
+        )
+        part = re.sub(r"\b\d{1,2}\b", " ", part)
+        part = clean_text(part)
 
-    first, second = numbers[0], numbers[1]
-    try:
-        score1, score2 = int(first.group(1)), int(second.group(1))
-    except ValueError:
-        return None
+        raw = [part]
 
-    team1 = basic_text[:first.start()].strip()
-    team2 = basic_text[first.end():second.start()].strip()
+        # Split common separators.
+        raw.extend(re.split(r"\s{2,}|\s+\|\s+|\s+•\s+|[|/]", part))
+        return unique_strings(raw)
 
-    team1 = re.sub(r"\s+\b[A-Z]{2,5}\b\s*$", "", team1).strip()
-    team2 = re.sub(r"\s+\b[A-Z]{2,5}\b\s*$", "", team2).strip()
-    team1 = clean_text(FT_RE.sub(" ", HT_RE.sub(" ", team1)))
-    team2 = clean_text(FT_RE.sub(" ", HT_RE.sub(" ", team2)))
+    left_candidates = candidates(before)
+    right_candidates = candidates(after)
 
-    if not team1 or not team2 or normalize_match_text(team1) == normalize_match_text(team2):
-        return None
+    # Remove candidates that are clearly too long and contain the opposite
+    # side twice. The normalizer already catches exact duplication.
+    left_candidates = [
+        x for x in left_candidates
+        if 1 <= len(normalize_team(x).split()) <= 8
+    ]
+    right_candidates = [
+        x for x in right_candidates
+        if 1 <= len(normalize_team(x).split()) <= 8
+    ]
 
-    link = match_element.select_one("a.fco-match-data")
-    href = str(link.get("href", "")).strip() if link else ""
-    context = extract_competition_context(match_element)
+    if not left_candidates or not right_candidates:
+        return "", ""
 
-    return {
-        "match_key": href or f"{normalize_match_text(team1)}|{normalize_match_text(team2)}",
-        "match_name": f"{team1} vs {team2}",
-        "team1": team1,
-        "team2": team2,
-        "score": (score1, score2),
-        "status": status,
-        "country": context["country"],
-        "league": context["league"],
-        "round": context["round"],
-    }
+    # Prefer candidate with fewer words; duplicated DOM strings tend to be
+    # longer than the actual visible team name.
+    left = min(left_candidates, key=lambda x: len(normalize_team(x).split()))
+    right = min(right_candidates, key=lambda x: len(normalize_team(x).split()))
+
+    return left, right
 
 
-def find_kooora_matches(soup):
-    items = soup.select(".fco-match-list-item[data-match-status]")
-    all_today = []
-    alert_matches = []
-    seen = set()
+def parse_kooora(html):
+    soup = BeautifulSoup(html, "html.parser")
+    cards = soup.select(".fco-match-list-item[data-match-status]")
 
-    for item in items:
-        data_status = str(item.get("data-match-status", "")).upper().strip()
-        basic = item.select_one(".fco-match-basic-data")
-        if basic is None:
+    counts = {"FIXTURE": 0, "LIVE": 0, "RESULT": 0}
+    matches = []
+
+    for card in cards:
+        status = clean_text(card.get("data-match-status", "")).upper()
+        if status not in counts:
             continue
-        raw_basic = clean_text(basic.get_text(" ", strip=True))
-        href_element = item.select_one("a.fco-match-data")
-        href = str(href_element.get("href", "")).strip() if href_element else ""
-        card_key = href or raw_basic
-        if card_key in seen:
+        counts[status] += 1
+
+        # We need a score for HT/FT detection.
+        score = extract_score_from_text(card.get_text(" ", strip=True))
+        if not score:
             continue
-        seen.add(card_key)
-        all_today.append({"key": card_key, "data_status": data_status, "raw": raw_basic})
 
-        parsed = parse_kooora_match_element(item)
-        if parsed:
-            alert_matches.append(parsed)
-
-    return all_today, alert_matches
-
-
-def get_kooora_page():
-    for url in (KOOORA_URL, KOOORA_FALLBACK_URL):
-        try:
-            response = requests.get(url, headers=KOOORA_HEADERS, timeout=KOOORA_TIMEOUT, allow_redirects=True)
-            print(f"Kooora response: HTTP {response.status_code} - {url}", flush=True)
-            print(f"Kooora final URL: {response.url}", flush=True)
-            print(f"Kooora HTML length: {len(response.text)}", flush=True)
-            if response.ok and response.text:
-                return response
-        except requests.RequestException as exc:
-            print(f"Kooora connection error: {exc}", flush=True)
-    return None
-
-# =========================================================
-# BOOKMAKER CHECK
-# =========================================================
-
-BOOKMAKER_SELECTORS = (
-    "article", "li", "tr",
-    "[class*='event']", "[class*='match']", "[class*='fixture']",
-    "[class*='game']", "[class*='sport']",
-    "[data-event-id]", "[data-event]", "[data-fixture-id]", "[data-match-id]",
-)
-
-
-def inspect_bookmaker_html(bookmaker, response, team1, team2):
-    if detect_captcha(response):
-        return {"status": "CAPTCHA", "url": response.url, "evidence": ""}
-    if response.status_code in (401, 403, 429):
-        return {"status": "BLOCKED", "url": response.url, "evidence": ""}
-    if response.status_code >= 500:
-        return {"status": "SERVER_ERROR", "url": response.url, "evidence": ""}
-    if response.status_code != 200:
-        return {"status": "NOT_CHECKED", "url": response.url, "evidence": ""}
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    candidates = []
-    seen_ids = set()
-
-    for selector in BOOKMAKER_SELECTORS:
-        try:
-            elements = soup.select(selector)
-        except Exception:
-            continue
-        for element in elements:
-            if id(element) in seen_ids:
+        if status == "RESULT":
+            phase = "FT"
+        elif status == "LIVE":
+            card_status = clean_text(
+                card.select_one(".fco-match-status").get_text(" ", strip=True)
+                if card.select_one(".fco-match-status") else ""
+            )
+            if re.search(r"\b(?:HT|HALF\s*TIME)\b|الشوط\s*الأول", card_status, re.I):
+                phase = "HT"
+            else:
+                # Do not classify an arbitrary live score as HT.
                 continue
-            seen_ids.add(id(element))
-            text = clean_text(element.get_text(" ", strip=True))
-            if not text or len(text) > 2500:
-                continue
-            if teams_match(text, team1, team2):
-                candidates.append(text)
-
-    candidates.sort(key=len)
-    for text in candidates:
-        if has_postmatch_marker(text):
+        else:
+            # Fixture is not a scored HT/FT alert.
             continue
-        if has_prematch_marker(text):
-            return {"status": "SAME_MATCH_PREMATCH", "url": response.url, "evidence": text[:500]}
 
-    # Simple bookmaker pages may put both teams directly in a link.
-    for link in soup.find_all("a"):
-        text = clean_text(link.get_text(" ", strip=True))
-        if text and len(text) <= 1200 and teams_match(text, team1, team2):
-            if not has_postmatch_marker(text) and has_prematch_marker(text):
-                return {"status": "SAME_MATCH_PREMATCH", "url": response.url, "evidence": text[:500]}
+        home, away = extract_team_names_from_card(card, score)
+        home_n = normalize_team(home)
+        away_n = normalize_team(away)
 
-    return {"status": "NOT_CONFIRMED", "url": response.url, "evidence": ""}
+        if not home_n or not away_n:
+            continue
+        if home_n == away_n:
+            continue
+
+        matches.append({
+            "home": display_team(home),
+            "away": display_team(away),
+            "home_norm": home_n,
+            "away_norm": away_n,
+            "home_tokens": meaningful_tokens(home),
+            "away_tokens": meaningful_tokens(away),
+            "home_score": score[0],
+            "away_score": score[1],
+            "phase": phase,
+        })
+
+    # Deduplicate by normalized team pair + phase + score.
+    unique = {}
+    for match in matches:
+        key = (
+            match["home_norm"],
+            match["away_norm"],
+            match["phase"],
+            match["home_score"],
+            match["away_score"],
+        )
+        unique[key] = match
+
+    result = list(unique.values())
+
+    print(
+        f"[KOOORA] cards={len(cards)} | "
+        f"FIXTURE={counts['FIXTURE']} | LIVE={counts['LIVE']} | "
+        f"RESULT={counts['RESULT']} | HT/FT={len(result)}"
+    )
+
+    for m in result[:60]:
+        print(
+            f"[KOOORA] {m['phase']} "
+            f"{m['home']} {m['home_score']}-{m['away_score']} {m['away']}"
+        )
+
+    return result
 
 
-def check_bookmaker_match(bookmaker, team1, team2):
-    url = BOOKMAKER_URLS[bookmaker]
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "Referer": url,
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=BOOKMAKER_TIMEOUT, allow_redirects=True)
-        result = inspect_bookmaker_html(bookmaker, response, team1, team2)
-        print(f"{bookmaker}: HTTP {response.status_code} {result['status']} {response.url}", flush=True)
-        if result["status"] == "SAME_MATCH_PREMATCH":
-            print(f"🚨 SAME MATCH PRE-MATCH: {bookmaker} | {team1} vs {team2}", flush=True)
-        return result
-    except requests.Timeout:
-        print(f"{bookmaker}: timeout", flush=True)
-        return {"status": "TIMEOUT", "url": url, "evidence": ""}
-    except requests.RequestException as exc:
-        print(f"{bookmaker}: {exc}", flush=True)
-        return {"status": "ERROR", "url": url, "evidence": ""}
-    except Exception as exc:
-        print(f"{bookmaker}: unexpected error: {exc}", flush=True)
-        return {"status": "ERROR", "url": url, "evidence": ""}
+# ============================================================
+# BOOKMAKER PAGE ANALYSIS
+# ============================================================
+
+def page_contains_marker(text, markers):
+    low = clean_text(text).lower()
+    return any(marker.lower() in low for marker in markers)
 
 
-def check_all_bookmakers_for_match(team1, team2):
-    results = {}
-    # Parallel requests keep one 60-second cycle from becoming unnecessarily long.
-    with ThreadPoolExecutor(max_workers=MAX_BOOKMAKER_WORKERS) as executor:
-        futures = {
-            executor.submit(check_bookmaker_match, bookmaker, team1, team2): bookmaker
-            for bookmaker in TARGET_BOOKMAKERS
+def classify_page(text, final_url=""):
+    combined = f"{text} {final_url}".lower()
+
+    if page_contains_marker(combined, CAPTCHA_MARKERS):
+        return "CAPTCHA"
+
+    if page_contains_marker(combined, POSTMATCH_MARKERS):
+        # This does not by itself mean our target match is finished. It only
+        # helps reject obvious historical/result pages.
+        post = True
+    else:
+        post = False
+
+    if page_contains_marker(combined, PREMATCH_MARKERS):
+        return "PREMATCH"
+
+    if post:
+        return "POSTMATCH"
+
+    return "NOT_CONFIRMED"
+
+
+def browser_check_one(bookmaker, url, matches):
+    """
+    Opens the bookmaker homepage with a real JS-capable browser and waits
+    for client-side rendering. It does NOT solve or bypass CAPTCHA/Cloudflare.
+    If a protection page is detected, the result is UNKNOWN.
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        return {
+            "bookmaker": bookmaker,
+            "status": "BROWSER_UNAVAILABLE",
+            "final_url": url,
+            "matches": [],
         }
-        for future in as_completed(futures):
-            bookmaker = futures[future]
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1440, "height": 1000},
+                locale="de-DE",
+                timezone_id="Europe/Berlin",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+
             try:
-                results[bookmaker] = future.result()
+                response = page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=BROWSER_TIMEOUT_MS,
+                )
+                # Give normal JS applications time to render.
+                page.wait_for_timeout(BROWSER_WAIT_MS)
+
+                final_url = page.url
+                title = page.title()
+                text = page.locator("body").inner_text(timeout=5000)
+
+                http_status = response.status if response else 0
+
+                if page_contains_marker(
+                    f"{title} {text} {final_url}",
+                    CAPTCHA_MARKERS,
+                ):
+                    print(
+                        f"[BROWSER] {bookmaker} HTTP={http_status} "
+                        f"CAPTCHA/PROTECTION final={final_url}"
+                    )
+                    return {
+                        "bookmaker": bookmaker,
+                        "status": "CAPTCHA",
+                        "final_url": final_url,
+                        "matches": [],
+                    }
+
+                # Search the rendered page for the exact target pair.
+                found = []
+                for match in matches:
+                    pair_score = pair_match_score(
+                        match["home"],
+                        match["away"],
+                        text,
+                    )
+                    if pair_score < 0.80:
+                        continue
+
+                    # For the same rendered page, require a pre-match signal
+                    # close enough to be meaningful. First use page-wide
+                    # markers, then inspect text snippets around team names.
+                    page_class = classify_page(text, final_url)
+
+                    if page_class == "PREMATCH":
+                        found.append({
+                            "match": match,
+                            "confidence": pair_score,
+                            "status": "PREMATCH",
+                        })
+                        continue
+
+                    # Try to find a local snippet containing both teams.
+                    low = text.lower()
+                    home_norm = normalize_team(match["home"])
+                    away_norm = normalize_team(match["away"])
+
+                    # Search each meaningful token and take nearby windows.
+                    local_confirmed = False
+                    for htoken in meaningful_tokens(match["home"]):
+                        idx = low.find(htoken)
+                        if idx < 0:
+                            continue
+                        window = low[max(0, idx - 1500): idx + 1500]
+                        if all(
+                            token in window
+                            for token in meaningful_tokens(match["away"])
+                        ):
+                            if page_contains_marker(window, PREMATCH_MARKERS):
+                                local_confirmed = True
+                                break
+
+                    if local_confirmed:
+                        found.append({
+                            "match": match,
+                            "confidence": pair_score,
+                            "status": "PREMATCH",
+                        })
+
+                status = "PREMATCH" if found else classify_page(text, final_url)
+
+                print(
+                    f"[BROWSER] {bookmaker} HTTP={http_status} "
+                    f"{status} final={final_url} "
+                    f"rendered_chars={len(text)} found={len(found)}"
+                )
+
+                return {
+                    "bookmaker": bookmaker,
+                    "status": status,
+                    "final_url": final_url,
+                    "matches": found,
+                }
+
+            finally:
+                context.close()
+                browser.close()
+
+    except PlaywrightTimeoutError as exc:
+        print(f"[BROWSER] {bookmaker} TIMEOUT: {exc}")
+        return {
+            "bookmaker": bookmaker,
+            "status": "TIMEOUT",
+            "final_url": url,
+            "matches": [],
+        }
+    except Exception as exc:
+        print(f"[BROWSER] {bookmaker} ERROR: {exc}")
+        return {
+            "bookmaker": bookmaker,
+            "status": "ERROR",
+            "final_url": url,
+            "matches": [],
+        }
+
+
+def requests_check_one(bookmaker, url, matches):
+    """
+    Safe fallback when Playwright is unavailable.
+    It never bypasses anti-bot protection.
+    """
+    try:
+        response = session.get(url, timeout=20, allow_redirects=True)
+        text = response.text
+        final_url = response.url
+
+        if page_contains_marker(
+            f"{response.text} {final_url}",
+            CAPTCHA_MARKERS,
+        ):
+            status = "CAPTCHA"
+        else:
+            status = classify_page(
+                BeautifulSoup(text, "html.parser").get_text(" ", strip=True),
+                final_url,
+            )
+
+        found = []
+        if status == "PREMATCH":
+            visible = BeautifulSoup(
+                text, "html.parser"
+            ).get_text(" ", strip=True)
+            for match in matches:
+                score = pair_match_score(
+                    match["home"], match["away"], visible
+                )
+                if score >= 0.80:
+                    found.append({
+                        "match": match,
+                        "confidence": score,
+                        "status": "PREMATCH",
+                    })
+
+        print(
+            f"[HTTP] {bookmaker} HTTP={response.status_code} "
+            f"{status} final={final_url} found={len(found)}"
+        )
+        return {
+            "bookmaker": bookmaker,
+            "status": status,
+            "final_url": final_url,
+            "matches": found,
+        }
+
+    except Exception as exc:
+        print(f"[HTTP] {bookmaker} ERROR: {exc}")
+        return {
+            "bookmaker": bookmaker,
+            "status": "ERROR",
+            "final_url": url,
+            "matches": [],
+        }
+
+
+# ============================================================
+# BOOKMAKER SCAN
+# ============================================================
+
+def scan_bookmakers(matches):
+    results = []
+
+    # Keep concurrency low. Chromium is much heavier than requests and
+    # Render instances can run out of RAM if every bookmaker opens at once.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    worker = browser_check_one if PLAYWRIGHT_AVAILABLE else requests_check_one
+
+    with ThreadPoolExecutor(max_workers=max(1, MAX_BROWSER_WORKERS)) as pool:
+        futures = [
+            pool.submit(worker, bookmaker, url, matches)
+            for bookmaker, url in BOOKMAKERS
+        ]
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
             except Exception as exc:
-                print(f"{bookmaker}: worker error: {exc}", flush=True)
-                results[bookmaker] = {"status": "ERROR", "url": BOOKMAKER_URLS[bookmaker], "evidence": ""}
+                print(f"[BOOKMAKER] worker error: {exc}")
+
     return results
 
-# =========================================================
-# ALERTS
-# =========================================================
+
+# ============================================================
+# ALERT LOGIC
+# ============================================================
 
 sent_alerts = set()
 
 
-def format_and_send_alert(match):
-    print(f"🔎 Checking SAME MATCH on bookmakers: {match['match_name']}", flush=True)
-    results = check_all_bookmakers_for_match(match["team1"], match["team2"])
-    confirmed = [
-        bookmaker for bookmaker in TARGET_BOOKMAKERS
-        if results.get(bookmaker, {}).get("status") == "SAME_MATCH_PREMATCH"
-    ]
-
-    if not confirmed:
-        print(f"ℹ️ No SAME_MATCH_PREMATCH confirmation for {match['match_name']}", flush=True)
-        return False
-
-    now = datetime.now().strftime("%H:%M:%S")
-    status_text = "انتهت المباراة تماماً (FT) ✅" if match["status"] == "FT" else "انتهى الشوط الأول (HT) ⏸️"
-    title = "🚨 تنبيه: نفس المباراة ما زالت Pre-match"
-
-    message = (
-        f"{title}\n\n"
-        f"⚽ المباراة: {match['match_name']}\n"
-        f"🔢 النتيجة على كووورة: {match['score'][0]} - {match['score'][1]}\n"
-        f"🌍 الدولة: {match['country']}\n"
-        f"🏆 البطولة: {match['league']}"
+def match_key(match):
+    return (
+        match["home_norm"],
+        match["away_norm"],
+        match["phase"],
+        match["home_score"],
+        match["away_score"],
     )
-    if match.get("round"):
-        message += f" — {match['round']}"
-    message += (
-        f"\n⏰ وقت التحديث: {now}\n"
-        f"🛑 حالة كووورة: {status_text}\n\n"
-        "🚨 نفس المباراة ما زالت Pre-match في:\n"
-        + "".join(f"• {bookmaker}\n" for bookmaker in confirmed)
-        + "\n⚠️ تم التأكد من وجود الفريقين داخل نفس عنصر المباراة مع علامة Pre-match.\n"
-        "ℹ️ إذا كانت المنصة تستخدم JavaScript ولا تُظهر المباراة في HTML، فلن يتم اعتبارها مؤكدة."
+
+
+def send_same_match_alert(bookmaker_result, found):
+    match = found["match"]
+    key = (
+        bookmaker_result["bookmaker"],
+        match_key(match),
     )
-    return send_telegram_message(message)
 
-
-def process_kooora_alerts(alert_matches):
-    date_key = datetime.now().strftime("%Y-%m-%d")
-    alerts = 0
-
-    for match in alert_matches:
-        alert_key = f"{date_key}|{match['match_key']}|{match['status']}"
-        if alert_key in sent_alerts:
-            continue
-
-        print(
-            f"🚨 REAL MATCH: {match['match_name']} | "
-            f"{match['score'][0]}-{match['score'][1]} | {match['status']}",
-            flush=True,
-        )
-
-        if format_and_send_alert(match):
-            sent_alerts.add(alert_key)
-            alerts += 1
-        else:
-            print("⏳ No bookmaker confirmation yet; retrying next cycle.", flush=True)
-
-    return alerts
-
-# =========================================================
-# SCAN
-# =========================================================
-
-
-def check_kooora_matches():
-    response = get_kooora_page()
-    if response is None:
-        print("❌ Unable to access Kooora", flush=True)
+    if key in sent_alerts:
         return
 
-    try:
-        soup = BeautifulSoup(response.text, "html.parser")
-        title = soup.title.get_text(" ", strip=True) if soup.title else "NO TITLE"
-        print(f"Kooora title: {title[:200]}", flush=True)
+    sent_alerts.add(key)
 
-        all_matches, alert_matches = find_kooora_matches(soup)
-        fixture_count = sum(m["data_status"] == "FIXTURE" for m in all_matches)
-        live_count = sum(m["data_status"] == "LIVE" for m in all_matches)
-        result_count = sum(m["data_status"] == "RESULT" for m in all_matches)
-
-        print(f"📅 TODAY cards: {len(all_matches)} | FIXTURE={fixture_count} | LIVE={live_count} | RESULT={result_count}", flush=True)
-        print(f"⚽ HT/FT matches ready for bookmaker checking: {len(alert_matches)}", flush=True)
-
-        for match in alert_matches:
-            print(
-                f"   REAL: {match['team1']} {match['score'][0]}-"
-                f"{match['score'][1]} {match['team2']} [{match['status']}]",
-                flush=True,
-            )
-
-        generated = process_kooora_alerts(alert_matches)
-        print(f"✅ Kooora scan finished. New alerts: {generated}", flush=True)
-
-        if len(sent_alerts) > 5000:
-            sent_alerts.clear()
-            print("sent_alerts cleared", flush=True)
-
-    except Exception as exc:
-        print(f"❌ Error scraping Kooora: {exc}", flush=True)
-
-# =========================================================
-# BOT LOOP
-# =========================================================
-
-
-def bot_loop():
-    print("🚀 BOT LOOP STARTED", flush=True)
-    send_telegram_message(
-        "🚀 تم تشغيل بوت مراقبة كووورة بنجاح!\n\n"
-        "📅 مراقبة جميع مباريات اليوم\n"
-        "🟡 مراقبة HT\n"
-        "🚨 مراقبة FT\n"
-        "🛡️ منع أوقات المباريات الوهمية كأنها نتائج\n"
-        "🚫 استبعاد CAPTCHA تلقائياً\n"
-        "🔎 البحث عن نفس الفريقين داخل نفس مباراة المراهنات\n"
-        "🔄 الفحص كل 60 ثانية"
+    message = (
+        "⚽ SAME MATCH PRE-MATCH\n\n"
+        f"🏠 {match['home']}\n"
+        f"🆚 {match['away']}\n"
+        f"📊 Kooora: {match['home_score']} - {match['away_score']} "
+        f"({match['phase']})\n"
+        f"🎯 Bookmaker: {bookmaker_result['bookmaker']}\n"
+        f"🔎 Status: PREMATCH\n"
+        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"🔗 {bookmaker_result['final_url']}"
     )
 
+    telegram_send(message)
+
+
+def process_scan():
+    started = time.time()
+
+    html = fetch_kooora_html()
+    if not html:
+        print("[SCAN] Kooora unavailable")
+        return
+
+    matches = parse_kooora(html)
+
+    if not matches:
+        print("[SCAN] No HT/FT matches extracted")
+        return
+
+    print(
+        f"[SCAN] Checking {len(matches)} Kooora HT/FT matches "
+        f"against {len(BOOKMAKERS)} bookmakers | "
+        f"Browser/JS={'ON' if PLAYWRIGHT_AVAILABLE else 'OFF'}"
+    )
+
+    results = scan_bookmakers(matches)
+
+    confirmed = 0
+    for result in results:
+        for found in result.get("matches", []):
+            if found.get("status") == "PREMATCH":
+                confirmed += 1
+                send_same_match_alert(result, found)
+
+    status_counts = {}
+    for result in results:
+        status = result.get("status", "UNKNOWN")
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    elapsed = time.time() - started
+    print(
+        f"[SCAN] Done in {elapsed:.1f}s | "
+        f"bookmaker statuses={status_counts} | "
+        f"confirmed={confirmed}"
+    )
+
+
+def scanner_loop():
+    print(
+        f"[START] Kooora Match Tracker | "
+        f"interval={SCAN_SECONDS}s | "
+        f"Playwright={'AVAILABLE' if PLAYWRIGHT_AVAILABLE else 'NOT INSTALLED'}"
+    )
+
+    # Scan immediately, then every configured interval.
     while True:
-        started = time.monotonic()
         try:
-            print("\n==============================", flush=True)
-            print("🔍 Checking ALL TODAY'S Kooora matches...", flush=True)
-            check_kooora_matches()
-            print("==============================\n", flush=True)
+            process_scan()
         except Exception as exc:
-            print(f"❌ Bot loop error: {exc}", flush=True)
+            print(f"[SCAN] UNHANDLED ERROR: {exc}")
 
-        elapsed = time.monotonic() - started
-        sleep_for = max(1, SCAN_INTERVAL - elapsed)
-        print(f"⏳ Next scan in {sleep_for:.0f} seconds...", flush=True)
-        time.sleep(sleep_for)
+        time.sleep(max(10, SCAN_SECONDS))
 
 
-# Start exactly one daemon thread in this process.
-threading.Thread(target=bot_loop, daemon=True, name="kooora-bot").start()
-
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    port = int(os.getenv("PORT", "10000"))
+
+    thread = threading.Thread(target=scanner_loop, daemon=True)
+    thread.start()
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False,
+    )
