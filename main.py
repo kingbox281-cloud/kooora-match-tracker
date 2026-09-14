@@ -40,11 +40,11 @@ TELEGRAM_CHAT_ID = os.environ.get(
 
 def send_telegram_message(message):
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN":
-        print("Telegram token is not configured.")
+        print("Telegram token is not configured.", flush=True)
         return None
 
     if not TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID == "YOUR_CHAT_ID":
-        print("Telegram chat ID is not configured.")
+        print("Telegram chat ID is not configured.", flush=True)
         return None
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -61,12 +61,18 @@ def send_telegram_message(message):
             timeout=15
         )
 
-        print("Telegram:", response.status_code)
+        print(
+            f"Telegram: {response.status_code}",
+            flush=True
+        )
 
         return response.json()
 
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(
+            f"Telegram error: {e}",
+            flush=True
+        )
         return None
 
 
@@ -222,12 +228,15 @@ def check_bookmaker_access(bookmaker):
 
         print(
             f"{bookmaker}: HTTP {response.status_code} "
-            f"{response.url}"
+            f"{response.url}",
+            flush=True
         )
 
+        # CAPTCHA / حماية البوت
         if detect_captcha(response):
             return "CAPTCHA"
 
+        # حالات منع الوصول
         if response.status_code in [401, 403, 429]:
             return "BLOCKED"
 
@@ -240,15 +249,24 @@ def check_bookmaker_access(bookmaker):
         return "NOT_CHECKED"
 
     except requests.exceptions.Timeout:
-        print(f"{bookmaker}: timeout")
+        print(
+            f"{bookmaker}: timeout",
+            flush=True
+        )
         return "TIMEOUT"
 
     except requests.exceptions.RequestException as e:
-        print(f"{bookmaker}: {e}")
+        print(
+            f"{bookmaker}: {e}",
+            flush=True
+        )
         return "ERROR"
 
     except Exception as e:
-        print(f"{bookmaker}: unexpected error: {e}")
+        print(
+            f"{bookmaker}: unexpected error: {e}",
+            flush=True
+        )
         return "ERROR"
 
 
@@ -262,9 +280,11 @@ def check_all_bookmakers():
 
         results[bookmaker] = status
 
+        # إذا وجد CAPTCHA، ننتقل مباشرة للمنصة التالية
         if status == "CAPTCHA":
             print(
-                f"🚫 {bookmaker}: CAPTCHA detected - skipped"
+                f"🚫 {bookmaker}: CAPTCHA detected - skipped",
+                flush=True
             )
 
         time.sleep(0.5)
@@ -336,7 +356,8 @@ def format_and_send_alert(
         )
 
     print(
-        f"Checking bookmakers for: {match_name}"
+        f"Checking bookmakers for: {match_name}",
+        flush=True
     )
 
     bookmaker_results = check_all_bookmakers()
@@ -417,7 +438,8 @@ def get_kooora_page():
 
             print(
                 f"Kooora response: "
-                f"{response.status_code} - {url}"
+                f"{response.status_code} - {url}",
+                flush=True
             )
 
             if response.status_code == 200:
@@ -426,7 +448,8 @@ def get_kooora_page():
         except Exception as e:
 
             print(
-                f"Kooora connection error: {e}"
+                f"Kooora connection error: {e}",
+                flush=True
             )
 
     return None
@@ -434,6 +457,7 @@ def get_kooora_page():
 
 def extract_match_name(text):
 
+    # إزالة بعض الكلمات غير المفيدة
     ignored = {
         "انتهت",
         "FT",
@@ -459,6 +483,7 @@ def extract_match_name(text):
         if clean in ignored:
             continue
 
+        # تجاهل بعض الأرقام
         if clean.isdigit():
             continue
 
@@ -477,12 +502,14 @@ def detect_status(text):
 
     upper_text = text.upper()
 
+    # FT
     if (
         "انتهت" in text
         or "FT" in upper_text
     ):
         return "FT"
 
+    # HT
     if (
         "الشوط الأول" in text
         or "HT" in upper_text
@@ -499,7 +526,8 @@ def check_kooora_matches():
     if response is None:
 
         print(
-            "❌ Unable to access Kooora"
+            "❌ Unable to access Kooora",
+            flush=True
         )
 
         return
@@ -514,8 +542,10 @@ def check_kooora_matches():
         current_league = "الدوري العام"
         current_country = "الدولي / محلي"
 
+        # محاولة قراءة الصفوف
         matches = soup.find_all("tr")
 
+        # إذا لم نجد tr، نجرب عناصر match
         if not matches:
 
             matches = soup.find_all(
@@ -524,7 +554,8 @@ def check_kooora_matches():
             )
 
         print(
-            f"Kooora elements found: {len(matches)}"
+            f"Kooora elements found: {len(matches)}",
+            flush=True
         )
 
         for match in matches:
@@ -536,6 +567,10 @@ def check_kooora_matches():
 
             if not text:
                 continue
+
+            # -----------------------------------------
+            # البطولة
+            # -----------------------------------------
 
             if (
                 "الدوري" in text
@@ -556,12 +591,24 @@ def check_kooora_matches():
                         parts[0][:60]
                     )
 
+            # -----------------------------------------
+            # الحالة
+            # -----------------------------------------
+
             status_detected = detect_status(text)
 
             if not status_detected:
                 continue
 
+            # -----------------------------------------
+            # اسم المباراة
+            # -----------------------------------------
+
             match_name = extract_match_name(text)
+
+            # -----------------------------------------
+            # ID ثابت قدر الإمكان
+            # -----------------------------------------
 
             match_id = (
                 f"{match_name}|"
@@ -575,9 +622,11 @@ def check_kooora_matches():
             print(
                 f"🚨 Detected: "
                 f"{match_name} - "
-                f"{status_detected}"
+                f"{status_detected}",
+                flush=True
             )
 
+            # إرسال التنبيه
             format_and_send_alert(
                 match_name,
                 current_country,
@@ -587,13 +636,17 @@ def check_kooora_matches():
 
             sent_alerts.add(match_id)
 
+            # منع نمو الذاكرة بلا حدود
             if len(sent_alerts) > 1000:
+
+                # الاحتفاظ بآخر جزء فقط
                 sent_alerts.clear()
 
     except Exception as e:
 
         print(
-            f"❌ Error scraping Kooora: {e}"
+            f"❌ Error scraping Kooora: {e}",
+            flush=True
         )
 
 
@@ -602,6 +655,11 @@ def check_kooora_matches():
 # =========================================================
 
 def bot_loop():
+
+    print(
+        "🚀 BOT LOOP STARTED",
+        flush=True
+    )
 
     current_time = datetime.now().strftime(
         "%H:%M:%S"
@@ -616,8 +674,18 @@ def bot_loop():
         "🔄 الفحص كل 60 ثانية"
     )
 
+    print(
+        "📨 Sending Telegram startup message...",
+        flush=True
+    )
+
     send_telegram_message(
         startup_message
+    )
+
+    print(
+        "✅ Startup message finished",
+        flush=True
     )
 
     while True:
@@ -625,27 +693,37 @@ def bot_loop():
         try:
 
             print(
-                "\n=============================="
+                "\n==============================",
+                flush=True
             )
 
             print(
-                "Checking Kooora..."
+                "🔍 Checking Kooora...",
+                flush=True
             )
 
             check_kooora_matches()
 
             print(
-                "Next check in 60 seconds..."
+                "✅ Kooora check finished",
+                flush=True
             )
 
             print(
-                "==============================\n"
+                "⏳ Next check in 60 seconds...",
+                flush=True
+            )
+
+            print(
+                "==============================\n",
+                flush=True
             )
 
         except Exception as e:
 
             print(
-                f"Bot loop error: {e}"
+                f"❌ Bot loop error: {e}",
+                flush=True
             )
 
         time.sleep(60)
