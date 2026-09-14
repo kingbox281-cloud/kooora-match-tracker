@@ -110,63 +110,63 @@ def check_kooora_matches():
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
                 
-                # البحث عن الحاويات التي تُمثل مباريات فعلية في كووورة
-                match_rows = soup.find_all(["tr", "div"], class_=lambda x: x and ('match' in x or 'game' in x or 'fi-row' in x))
-                if not match_rows:
-                    match_rows = soup.find_all("tr")
+                # استهداف الجداول أو الكتل التي تحتوي على تفاصيل المباريات بدقة
+                match_blocks = soup.find_all(['tr', 'div'], class_=lambda x: x and any(c in x for c in ['match', 'game', 'fi-', 'm-row']))
+                if not match_blocks:
+                    match_blocks = soup.find_all('tr')
 
-                for row in match_rows:
-                    text = row.get_text(separator=" | ", strip=True)
-                    if not text or len(text) < 10:
+                for block in match_blocks:
+                    full_text = block.get_text(separator=" | ", strip=True)
+                    if not full_text or len(full_text) < 10:
                         continue
 
-                    upper_text = text.upper()
+                    upper_text = full_text.upper()
                     
-                    # يجب أن تكون المباراة منتهية فعلياً
-                    if "انتهت" in text or "FT" in upper_text:
-                        parts = [p.strip() for p in text.split("|") if len(p.strip()) > 1]
+                    # التأكد الجازم أن المباراة انتهت (تاريخياً أو حالياً)
+                    if "انتهت" in full_text or "FT" in upper_text or "انتهت المباراة" in full_text:
                         
-                        # استبعاد الكلمات الترويجية أو العناوين العامة
-                        ignore_words = [
+                        # محاولة استخراج الفريقين والنتيجة من النص المهيكل
+                        teams_found = []
+                        score_detected = "غير متوفرة"
+                        
+                        # البحث عن النتيجة النمطية (مثل 2-1 أو 0 - 3)
+                        score_match = re.search(r'(\d+\s*[-–]\s*\d+)', full_text)
+                        if score_match:
+                            score_detected = score_match.group(1)
+
+                        # تنظيف النصوص واستخراج الأجزاء النصية المفيدة
+                        parts = [p.strip() for p in full_text.split("|") if len(p.strip()) > 2]
+                        
+                        ignore_list = [
                             "انتهت", "FT", "-", "وقت اضافي", "ركلات ترجيح", "المباراة", 
                             "الدوري", "كأس", "بطولة", "المجموعة", "الجولة", "الاسبوع",
-                            "دوري أبطال", "تصفيات", "ودية", "دولي"
+                            "دوري أبطال", "تصفيات", "ودية", "دولي", "مباريات اليوم", score_detected
                         ]
-                        
-                        cleaned_parts = []
+
                         for p in parts:
-                            # تجاهل أي جزء يحتوي على كلمات عامة أو أسماء بطولات
-                            if any(w in p for w in ignore_words):
+                            # تجاهل الكلمات العامة وأرقام النتيجة والبطولات
+                            if any(ignore_word == p or ignore_word in p for ignore_word in ignore_list):
                                 continue
-                            if len(p) < 3:
+                            if re.match(r'^\d+$', p): # تجاهل الأرقام المنفردة (كالوقت أو التوقيت)
                                 continue
-                            cleaned_parts.append(p)
+                            if len(p) > 2 and p not in teams_found:
+                                teams_found.append(p)
 
-                        # البحث عن النتيجة النهائية
-                        score_match = re.search(r'(\d+\s*[-–]\s*\d+)', text)
-                        score_detected = score_match.group(1) if score_match else "غير متوفرة"
-
-                        # لضمان أننا امام فريقين حقيقيين، يجب ألا تقل الأجزاء النقية عن فريقين واضحين
-                        team1 = ""
-                        team2 = ""
-                        
-                        for p in cleaned_parts:
-                            if not team1:
-                                team1 = p
-                            elif not team2 and p != team1:
-                                team2 = p
-                                break
-
-                        # فلترة صارمة لمنع التقاط أسماء منتخبات متطابقة أو كلمات مكررة (مثل هيبار vs HEB)
-                        if not team1 or not team2:
+                        # يجب أن نجد فريقين حقيقيين فقط لا غير
+                        if len(teams_found) < 2:
                             continue
-                        
+
+                        team1 = teams_found[0]
+                        team2 = teams_found[1]
+
+                        # منع تداخل الأسماء أو تشابهها الوهمي (مثل الفريق ضد نفسه أو اختصاره)
                         if team1.lower() in team2.lower() or team2.lower() in team1.lower():
                             continue
 
                         match_name = f"{team1} vs {team2}"
                         match_fingerprint = f"{team1}_{team2}".lower()
 
+                        # التأكد من عدم إرسال نفس المباراة مجدداً
                         if match_fingerprint not in sent_matches_cache:
                             sent_matches_cache.add(match_fingerprint)
                             
@@ -196,7 +196,7 @@ def check_kooora_matches():
             pass
 
 def bot_loop():
-    send_telegram_message("🛡️ تم تفعيل الفلترة المتقدمة لمنع التقاط أسماء البطولات والفرق الوهمية!")
+    send_telegram_message("🎯 تم تحديث نظام المطابقة الدقيقة للفرق ومنع الأخطاء بنجاح!")
     while True:
         try:
             check_kooora_matches()
