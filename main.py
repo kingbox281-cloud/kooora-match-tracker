@@ -1,221 +1,131 @@
-import os
 import time
-import threading
 import requests
-import re
-from datetime import datetime
-from flask import Flask
-from bs4 import BeautifulSoup
 
-app = Flask(__name__)
+# ==================== إعدادات الإتصال ====================
+TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"
 
-@app.route("/")
-def home():
-    return "Result Gap Hunter Bot is running 24/7!"
+# رابط صفحة المباريات الأساسي للمراقبة
+KOOORA_LIVE_URL = "https://www.kooora.com/?live=1"
 
-@app.route("/health")
-def health():
-    return "OK"
+# قائمة الـ 18 منصة التي يتم مراقبتها
+LIST_OF_18_PLATFORMS = [
+    "Tipico", "bet365", "Merkur Bets", "ODDSET", "bwin", 
+    "Interwetten", "Bet-at-home", "NEO.BET", "Betway", "Winamax",
+    "Sportingbet", "TOTO", "Betano", "Pox Gewinnspiel", "HappyBet",
+    "Cashpoint", "Boylesports", "Vbet"
+]
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
+# ==================== وظائف البوت ====================
 
-def send_telegram_message(message):
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN":
-        return None
+def send_telegram_alert(country, league_name, match_name, match_score, kooora_status, delayed_platforms):
+    """إرسال تنبيه منظم ومرتب إلى تليجرام مع دمج النتيجة بجانب الفريقين"""
+    
+    delayed_list_str = ""
+    for p in delayed_platforms:
+        delayed_list_str += f"  🟢 `{p}`\n"
+        
+    closed_count = len(LIST_OF_18_PLATFORMS) - len(delayed_platforms)
+
+    message = (
+        "🚨 *رصد فجوة مراهنات (Arbitrage Gap Detected!)* 🚨\n\n"
+        f"🌍 *الدولة:* {country}\n"
+        f"🏆 *البطولة / الدوري:* {league_name}\n"
+        f"⚽ *المباراة:* {match_name} ({match_score})\n"
+        f"⏱️ *حالة المصدر (كووورة):* {kooora_status} 🛑\n\n"
+        "📊 *حالة المنصات الـ 18:*\n"
+        "• *المتأخرة (تسمح بالرهان / Pre-match):*\n"
+        f"{delayed_list_str}\n"
+        "• *المغلقة (سليمة):*\n"
+        f"  🔴 {closed_count} منصات أُغلقت في الوقت المناسب\n\n"
+        "⚡ _يرجى التحقق والتوجه للمنصة فوراً!_"
+    )
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    
     try:
         response = requests.post(url, json=payload, timeout=10)
         return response.json()
-    except Exception:
-        return None
+    except Exception as e:
+        print(f"❌ خطأ في إرسال التنبيه عبر تيليجرام: {e}")
 
-# روابط كووورة الرسمية لجداول مباريات اليوم
-KOOORA_URLS = [
-    "https://www.kooora.com/%D9%83%D8%B1%D8%A9-%D8%A7%D9%84%D9%82%D8%AF%D9%85/%D9%85%D8%A8%D8%A7%D8%B1%D9%8A%D8%A7%D8%AA-%D8%A7%D9%84%D9%8A%D9%88%D9%85"
-]
-
-KOOORA_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept-Language": "ar,en;q=0.9"
-}
-
-TARGET_BOOKMAKERS = [
-    "Tipico", "Tipwin", "Merkur Bets", "sportwetten.de", "NEO.bet", 
-    "bet365", "Winamax", "bwin", "Betano", "Bet-at-home", 
-    "ODDSET", "Interwetten", "DAZN Bet", "AdmiralBet", 
-    "Betway", "LeoVegas", "VBET", "Bet3000"
-]
-
-BOOKMAKER_URLS = {
-    "Tipico": "https://www.tipico.de/",
-    "Tipwin": "https://www.tipwin.de/",
-    "Merkur Bets": "https://www.merkurbets.de/",
-    "sportwetten.de": "https://www.sportwetten.de/",
-    "NEO.bet": "https://www.neo.bet/",
-    "bet365": "https://www.bet365.com/",
-    "Winamax": "https://www.winamax.de/",
-    "bwin": "https://www.bwin.de/",
-    "Betano": "https://www.betano.de/",
-    "Bet-at-home": "https://www.bet-at-home.com/",
-    "ODDSET": "https://www.oddset.de/",
-    "Interwetten": "https://www.interwetten.com/",
-    "DAZN Bet": "https://www.daznbet.de/",
-    "AdmiralBet": "https://www.admiralbet.de/",
-    "Betway": "https://betway.de/",
-    "LeoVegas": "https://www.leovegas.com/",
-    "VBET": "https://www.vbet.de/",
-    "Bet3000": "https://www.bet3000.com/"
-}
-
-CAPTCHA_WORDS = ["captcha", "recaptcha", "hcaptcha", "verify you are human", "security check", "cloudflare", "access denied"]
-
-def detect_captcha(response):
-    text = response.text.lower()
-    for word in CAPTCHA_WORDS:
-        if word in text:
-            return True
-    return False
-
-def check_bookmaker_access(bookmaker):
-    url = BOOKMAKER_URLS.get(bookmaker)
-    if not url:
-        return "ERROR"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+def fetch_kooora_matches_today():
+    """
+    دالة جلب وتجميع المباريات الحقيقية من كووورة والمنصات.
+    يجب أن تعيد هذه الدالة قائمة من القواميس (List of Dicts) بالهيكل التالي الحقيقي:
+    [
+       {
+           "country": "اسم الدولة",
+           "league": "اسم البطولة/الدوري",
+           "name": "اسم الفريقين (مثلاً: بايرن ميونخ vs دورتموند)",
+           "score": "النتيجة النهائية (مثلاً: 3 - 1)",
+           "status": "حالة المباراة الحقيقية من كووورة (مثل FT)",
+           "platforms_status": {
+               "Merkur Bets": "Pre-match أو Closed",
+               "Tipico": "Pre-match أو Closed",
+               ... وباقي المنصات الـ 18
+           }
+       }
+    ]
+    """
+    matches_list = []
+    
     try:
-        response = requests.get(url, headers=headers, timeout=5, allow_redirects=True)
-        if detect_captcha(response):
-            return "CAPTCHA"
-        if response.status_code in [401, 403, 429]:
-            return "BLOCKED"
-        if response.status_code == 200:
-            return "ACCESSIBLE"
-        return "ERROR"
-    except Exception:
-        return "ERROR"
+        # --- [ضع كود السحب الحقيقي الخاص بك هنا لجلب المباريات والنتائج وحالة المنصات] ---
+        pass
+        
+    except Exception as e:
+        print(f"⚠️ خطأ أثناء جلب البيانات من الموقع: {e}")
+        
+    return matches_list
 
-def check_all_bookmakers():
-    results = {}
-    for bookmaker in TARGET_BOOKMAKERS:
-        results[bookmaker] = check_bookmaker_access(bookmaker)
-    return results
-
-sent_matches_cache = set()
-
-def parse_kooora_matches():
-    for url in KOOORA_URLS:
-        try:
-            response = requests.get(url, headers=KOOORA_HEADERS, timeout=12)
-            if response.status_code != 200:
-                continue
-            
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            # استهداف حاويات المباريات في هيكل كووورة المحدث (غالباً تكون ضمن عناصر تضمن تفاصيل اللقاء)
-            match_boxes = soup.find_all(['div', 'tr'], class_=lambda x: x and any(c in x for c in ['match', 'game', 'fi-block', 'match-item']))
-            
-            if not match_boxes:
-                # طريقة بديلة في حال تغير التصميم: البحث عن الجداول التي تحتوي عمود النتيجة
-                match_boxes = soup.find_all('tr')
-
-            for box in match_boxes:
-                text_content = box.get_text(separator=" | ", strip=True)
-                if not text_content or len(text_content) < 15:
-                    continue
-
-                upper_text = text_content.upper()
-                
-                # التحقق الحازم من حالة انتهاء المباراة
-                if "انتهت" in text_content or "FT" in upper_text:
-                    
-                    # استخراج النتيجة (مثلاً 2-1 أو 0 - 0)
-                    score_match = re.search(r'(\d+\s*[-–]\s*\d+)', text_content)
-                    if not score_match:
-                        continue # إذا لم توجد نتيجة مسجلة رسمياً، نتخطى المباراة لضمان عدم إرسال بيانات ناقصة
-                    
-                    score_detected = score_match.group(1)
-
-                    # استخراج أسماء الفرق بدقة من خلال تحليل النصوص الصافية
-                    # في كووورة عادة يكون النص: الفريق الأول | النتيجة | الفريق الثاني
-                    parts = [p.strip() for p in text_content.split("|") if len(p.strip()) > 2]
-                    
-                    # تنظيف القائمة من الكلمات الدلالية والبطولات والأرقام
-                    unwanted = [
-                        "انتهت", "FT", "-", "وقت اضافي", "ركلات ترجيح", "المباراة", 
-                        "الدوري", "كأس", "بطولة", "المجموعة", "الجولة", "الاسبوع",
-                        "دوري أبطال", "تصفيات", "ودية", "دولي", "مباريات اليوم", score_detected
-                    ]
-                    
-                    clean_teams = []
-                    for p in parts:
-                        if p in unwanted or any(w in p for w in unwanted):
-                            continue
-                        if re.match(r'^\d{1,2}:\d{2}$', p): # تجاهل أوقات المباريات (مثل 18:00)
-                            continue
-                        if len(p) > 2:
-                            clean_teams.append(p)
-
-                    # يجب أن نحصل على ناديين حقيقيين مختلفين تماماً
-                    if len(clean_teams) < 2:
-                        continue
-
-                    team1 = clean_teams[0]
-                    team2 = clean_teams[1]
-
-                    # شروط إضافية لمنع الأخطاء الوهمية والأسماء المتطابقة
-                    if team1.lower() == team2.lower() or team1.lower() in team2.lower() or team2.lower() in team1.lower():
-                        continue
-                    
-                    # التأكد من أن الفريقين لا يحتويان على أحرف لاتينية مكررة (مثل هيبار vs HEB)
-                    if len(team1) <= 3 or len(team2) <= 3:
-                        continue
-
-                    match_name = f"{team1} vs {team2}"
-                    match_fingerprint = f"{team1}_{team2}_{score_detected}".lower()
-
-                    # التأكد من عدم تكرار إرسال نفس المباراة نهائياً
-                    if match_fingerprint not in sent_matches_cache:
-                        sent_matches_cache.add(match_fingerprint)
-                        
-                        # فحص حالة المنصات للتأكد من وجود فجوة حقيقية (أنها معروضة كـ Pre-match)
-                        bookmaker_results = check_all_bookmakers()
-                        
-                        message = (
-                            f"🚨 *رصد فجوة مطابقة دقيقة (انتهت vs لم تبدأ)!* 🚨\n\n"
-                            f"⚽ المباراة: {match_name}\n"
-                            f"🛑 الحالة على كووورة: انتهت المباراة (FT)\n"
-                            f"🎯 *النتيجة النهائية المؤكدة: ( {score_detected} )*\n"
-                            f"⚠️ حالة المنصات: معروضة كـ (لم تبدأ بعد / Pre-match)\n"
-                            f"⏰ وقت الرصد: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                            f"🟢 المنصات المتأخرة التي تعرضها كـ \"لم تبدأ\":\n"
-                        )
-
-                        accessible_count = 0
-                        for bookmaker in TARGET_BOOKMAKERS:
-                            if bookmaker_results.get(bookmaker) == "ACCESSIBLE":
-                                accessible_count += 1
-                                message += f"• {bookmaker}: 🟢 متاحة (تسمح بالرهان المسبق)\n"
-
-                        message += f"\n📊 إجمالي المنصات المتأخرة: {accessible_count} من أصل 18"
-                        
-                        send_telegram_message(message)
-            break
-        except Exception:
-            pass
-
-def bot_loop():
-    send_telegram_message("🛡️ تم تفعيل نظام الفلترة المطلقة: لا تنبيه إلا لوجود نتيجة نهائية مؤكدة وناديين حقيقيين!")
+def run_arbitrage_bot():
+    """حلقة العمل الرئيسية التي تعمل بلا توقف 24/7 لمراقبة السوق"""
+    print("🤖 بدأ تشغيل بوت مراقبة فجوات كووورة بنجاح...")
+    
     while True:
         try:
-            parse_kooora_matches()
-        except Exception:
-            pass
-        time.sleep(60)
+            print("🔄 جاري فحص مباريات اليوم وتحديث الحالة...")
+            
+            # 1. جلب قائمة مباريات اليوم الحقيقية
+            matches = fetch_kooora_matches_today()
+            
+            for match in matches:
+                country = match.get("country", "غير محدد")
+                league = match.get("league", "بطولة غير محددة")
+                match_name = match.get("name")
+                match_score = match.get("score", "0 - 0")
+                status = match.get("status")
+                platforms_data = match.get("platforms_status", {})
+                
+                # 2. التحقق مما إذا كانت المباراة قد انتهت فعلاً على كووورة
+                if status in ["FT", "انتهت", "Ended"]:
+                    delayed_platforms = []
+                    
+                    # 3. الفحص على المنصات الـ 18 الحقيقية
+                    for platform in LIST_OF_18_PLATFORMS:
+                        p_status = platforms_data.get(platform, "Closed")
+                        if p_status == "Pre-match":
+                            delayed_platforms.append(platform)
+                    
+                    # 4. إذا وجدت منصات متأخرة حقيقية، أرسل تنبيه فوري
+                    if len(delayed_platforms) > 0:
+                        print(f"🚨 تم رصد ثغرة للمباراة: {match_name} ({match_score}) - {league}")
+                        send_telegram_alert(country, league, match_name, match_score, status, delayed_platforms)
+                
+            # الانتظار لدقيقة واحدة قبل الدورة التالية لتجنب الحظر
+            time.sleep(60)
+            
+        except Exception as e:
+            print(f"⚠️ حدث خطأ في الحلقة الرئيسية: {e}")
+            time.sleep(30)
 
-bot_thread = threading.Thread(target=bot_loop, daemon=True)
-bot_thread.start()
-
+# نقطة بداية التشغيل
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    run_arbitrage_bot()
+
