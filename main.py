@@ -30,7 +30,7 @@ except Exception:
 
 # ============================================================
 # KOOORA MATCH TRACKER
-# VERSION 3.9
+# VERSION 3.10
 #
 # Main rule:
 #     DOUBT = REJECT
@@ -85,7 +85,7 @@ def get_scanner_state():
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_9_RENDER_ASYNC_PLAYWRIGHT"
+APP_VERSION = "KOOORA_BROWSER_V3_10_RENDER_ASYNC_PLAYWRIGHT"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -104,7 +104,7 @@ BROWSER_WAIT_MS = int(
 )
 
 MAX_BROWSER_WORKERS = int(
-    os.getenv("MAX_BROWSER_WORKERS", "3")
+    os.getenv("MAX_BROWSER_WORKERS", "1")
 )
 
 MIN_MATCH_CONFIDENCE = float(
@@ -289,6 +289,13 @@ sent_alerts = set()
 sent_alerts_lock = threading.Lock()
 
 scan_lock = threading.Lock()
+
+# V3.10 safety guard:
+# Never allow two Chromium instances to launch at the same time,
+# even if a future code path accidentally creates concurrent
+# bookmaker tasks. This is intentionally independent of the
+# scanner lock.
+browser_launch_lock = threading.Lock()
 
 
 # ============================================================
@@ -1926,14 +1933,36 @@ async def browser_check_one_async(
             f"PLAYWRIGHT_BROWSERS_PATH={os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')}"
         )
 
-        browser = await playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
+        # V3.10: serialize Chromium launches.
+        # MAX_BROWSER_WORKERS=1 already limits bookmaker concurrency,
+        # but this extra guard protects against accidental overlap.
+        acquired_browser_launch = browser_launch_lock.acquire(
+            blocking=False
         )
+
+        if not acquired_browser_launch:
+            log(
+                f"[{bookmaker}] Chromium launch blocked -> "
+                f"another browser is already active"
+            )
+            return {
+                "bookmaker": bookmaker,
+                "status": "BROWSER_BUSY",
+                "final_url": homepage_url,
+                "matches": [],
+            }
+
+        try:
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
+        finally:
+            browser_launch_lock.release()
 
         context = await browser.new_context(
             viewport={"width": 1440, "height": 1000},
@@ -2707,6 +2736,13 @@ def scanner_loop():
     )
 
     log(
+        "[START] V3.10 overlap protection=ENABLED"
+    )
+    log(
+        "[START] V3.10 Chromium launch serialization=ENABLED"
+    )
+
+    log(
         f"[START] "
         f"MIN_MATCH_CONFIDENCE="
         f"{MIN_MATCH_CONFIDENCE}"
@@ -2749,22 +2785,33 @@ def scanner_loop():
 
         try:
 
-            # Avoid overlapping scanner executions.
+            # V3.10 hard guard:
+            # If a previous scan is still running, do NOT start another
+            # scan and therefore do NOT start any additional Chromium.
             acquired = scan_lock.acquire(
                 blocking=False
             )
 
             if not acquired:
                 log(
-                    "[SCAN] Previous scan still running -> skip overlap"
+                    "[SCAN] Previous scan still running -> "
+                    "SKIP this cycle | no Chromium started"
                 )
 
             else:
                 try:
+                    log(
+                        "[SCAN] Scan lock acquired -> "
+                        "starting one protected scan"
+                    )
                     process_scan()
 
                 finally:
                     scan_lock.release()
+                    log(
+                        "[SCAN] Scan lock released -> "
+                        "Chromium/bookmaker phase may start on next cycle"
+                    )
 
         except Exception as exc:
             finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2837,7 +2884,7 @@ if __name__ == "__main__":
     # STARTUP TESTS
     # --------------------------------------------------------
     log(
-        "--- [TEST MESSAGE] V3.9 Diagnostic: "
+        "--- [TEST MESSAGE] V3.10 Diagnostic: "
         "نظام الفحص يعمل بشكل سليم ---"
     )
     telegram_send_test_message()
