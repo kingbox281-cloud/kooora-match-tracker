@@ -1,8 +1,7 @@
 import os
-
-# Keep Playwright browsers inside the application environment on Render.
-# IMPORTANT: this must be set BEFORE importing Playwright.
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+# Render: keep Playwright browsers inside the Python environment so runtime
+# uses the same browser location that the build step installs.
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
 
 import re
 import time
@@ -19,8 +18,8 @@ from bs4 import BeautifulSoup
 from flask import Flask
 
 try:
-    from playwright.async_api import (
-        async_playwright,
+    from playwright.sync_api import (
+        sync_playwright,
         TimeoutError as PlaywrightTimeoutError,
     )
     PLAYWRIGHT_AVAILABLE = True
@@ -85,7 +84,7 @@ def get_scanner_state():
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_8_RENDER_ASYNC_PLAYWRIGHT"
+APP_VERSION = "KOOORA_BROWSER_V3_9_RENDER_STABLE"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -100,11 +99,11 @@ BROWSER_TIMEOUT_MS = int(
 )
 
 BROWSER_WAIT_MS = int(
-    os.getenv("BROWSER_WAIT_MS", "5000")
+    os.getenv("BROWSER_WAIT_MS", "2500")
 )
 
 MAX_BROWSER_WORKERS = int(
-    os.getenv("MAX_BROWSER_WORKERS", "3")
+    os.getenv("MAX_BROWSER_WORKERS", "2")
 )
 
 MIN_MATCH_CONFIDENCE = float(
@@ -125,6 +124,13 @@ MAX_EVENT_BLOCKS = int(
 
 HTTP_TIMEOUT = int(
     os.getenv("HTTP_TIMEOUT", "20")
+)
+
+# Hard wall-clock budget for one bookmaker. If exceeded, the bookmaker is
+# rejected for this scan. This prevents one slow/blocked site from holding
+# Chromium open for minutes.
+BOOKMAKER_MAX_SECONDS = float(
+    os.getenv("BOOKMAKER_MAX_SECONDS", "45")
 )
 
 
@@ -313,9 +319,6 @@ def health():
         "status": "ok",
         "version": APP_VERSION,
         "playwright": PLAYWRIGHT_AVAILABLE,
-        "playwright_browsers_path": os.environ.get(
-            "PLAYWRIGHT_BROWSERS_PATH", ""
-        ),
         "scan_seconds": SCAN_SECONDS,
         "workers": MAX_BROWSER_WORKERS,
         "min_match_confidence": MIN_MATCH_CONFIDENCE,
@@ -572,30 +575,10 @@ def pair_match_score(home, away, local_text):
 # ============================================================
 
 def contains_marker(text, markers):
-    """
-    Conservative marker detection.
-
-    Short markers (ft / ht / live) are matched as tokens so that a random
-    substring inside a team name, URL, or unrelated word cannot change the
-    event status.
-    """
     low = clean_text(text).lower()
-    if not low:
-        return False
 
     for marker in markers:
-        marker = clean_text(marker).lower()
-        if not marker:
-            continue
-
-        # Very short markers must be token/boundary based.
-        if marker in {"ft", "ht", "live"}:
-            if re.search(rf"(?<![\w]){re.escape(marker)}(?![\w])", low):
-                return True
-            continue
-
-        # Arabic / multi-word markers and normal phrases.
-        if marker in low:
+        if marker.lower() in low:
             return True
 
     return False
@@ -718,202 +701,88 @@ def extract_score(text):
 
     patterns = [
         r"\b(\d{1,2})\s*[-:]\s*(\d{1,2})\b",
+        r"\b(\d{1,2})\s*:\s*(\d{1,2})\b",
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, text)
+        match = re.search(
+            pattern,
+            text,
+        )
+
         if match:
-            return int(match.group(1)), int(match.group(2))
-
-    return None, None
-
-
-def _kooora_attribute_text(tag):
-    """Collect status/phase-like DOM attributes from a Kooora card."""
-    values = []
-
-    try:
-        for key in (
-            "data-match-status", "data-status", "data-phase", "data-period",
-            "data-state", "data-match-state", "data-match-phase",
-            "aria-label", "title", "alt", "class",
-        ):
-            value = tag.get(key, "")
-            if isinstance(value, (list, tuple)):
-                value = " ".join(str(x) for x in value)
-            if value:
-                values.append(str(value))
-    except Exception:
-        pass
-
-    # Also inspect descendants whose class/id suggests status/phase/state.
-    try:
-        for child in tag.find_all(True):
-            attrs = " ".join(
-                str(child.get(k, ""))
-                for k in ("class", "id", "data-status", "data-phase", "data-period", "data-state")
-            ).lower()
-            if any(x in attrs for x in ("status", "phase", "period", "state", "minute", "timer")):
-                txt = clean_text(child.get_text(" ", strip=True))
-                if txt:
-                    values.append(txt)
-                for k in ("data-status", "data-phase", "data-period", "data-state", "aria-label", "title"):
-                    v = child.get(k, "")
-                    if v:
-                        values.append(str(v))
-    except Exception:
-        pass
-
-    return clean_text(" | ".join(values))
-
-
-def _kooora_has_explicit_marker(text, markers):
-    return contains_marker(text, markers)
-
-
-def detect_kooora_phase(card, status, text):
-    """
-    Conservative Kooora phase detection.
-
-    Priority:
-      1) explicit result card -> FT
-      2) explicit HT/halftime marker -> HT
-      3) explicit FT marker -> FT
-      4) otherwise unknown
-
-    Generic words such as 'final' are deliberately NOT enough on a LIVE card,
-    because league/navigation text can contain them and create false FT states.
-    """
-    if status == "RESULT":
-        return "FT"
-
-    attr_text = _kooora_attribute_text(card)
-    combined = clean_text(f"{attr_text} | {text}").lower()
-
-    ht_markers = [
-        "ht", "half time", "halftime", "half-time", "halbzeit", "pause",
-        "الشوط الأول", "الشوط الاول", "بين الشوطين", "استراحة",
-        "نهاية الشوط الأول", "نهاية الشوط الاول", "نصف الوقت",
-    ]
-    ft_markers = [
-        "انتهت", "انتهى", "full time", "full-time", "finished",
-        "match ended", "spiel beendet", "beendet", "endstand", "abpfiff",
-        "النهاية", "انتهت المباراة", "انتهى اللقاء", "نهاية المباراة",
-    ]
-
-    # On a LIVE card, HT is the first valid state. Do not use generic
-    # 'final'/'finish' words from unrelated page text.
-    if status == "LIVE":
-        if _kooora_has_explicit_marker(combined, ht_markers):
-            return "HT"
-        if _kooora_has_explicit_marker(combined, ft_markers):
-            return "FT"
-        return ""
-
-    # For cards without a reliable data status, explicit markers still work.
-    if _kooora_has_explicit_marker(combined, ht_markers):
-        return "HT"
-    if _kooora_has_explicit_marker(combined, ft_markers):
-        return "FT"
-
-    return ""
-
-
-def extract_kooora_score(card, text):
-    """Try visible text first, then score-like DOM attributes/elements."""
-    score = extract_score(text)
-    if score != (None, None):
-        return score
-
-    try:
-        for child in card.find_all(True):
-            attrs = " ".join(
-                str(child.get(k, ""))
-                for k in ("class", "id", "data-score", "data-home-score", "data-away-score")
-            ).lower()
-            if not any(x in attrs for x in ("score", "result", "goals")):
-                continue
-
-            values = []
-            for k in ("data-score", "data-home-score", "data-away-score"):
-                v = child.get(k, "")
-                if v != "":
-                    values.append(str(v))
-            values.append(child.get_text(" ", strip=True))
-            sc = extract_score(clean_text(" ".join(values)))
-            if sc != (None, None):
-                return sc
-    except Exception:
-        pass
+            return (
+                int(match.group(1)),
+                int(match.group(2)),
+            )
 
     return None, None
 
 
 def extract_team_candidates(card):
-    """Extract likely team names while filtering navigation/status noise."""
+    """
+    Kooora DOM varies over time, so use several likely selectors.
+    """
+
     selectors = [
         ".fco-team-name",
-        ".fco-team-name a",
+        ".team-name",
         "[class*='team-name']",
         "[class*='teamName']",
         "[class*='participant']",
         "[class*='competitor']",
-        "[data-team-name]",
+        "a",
     ]
 
     candidates = []
-    seen = set()
 
-    def add(value):
-        value = clean_text(value)
-        if not value:
-            return
-
-        value = re.sub(
-            r"\b(?:FT|HT|LIVE|FIXTURE|RESULT|PREMATCH|SCHEDULED)\b",
-            " ", value, flags=re.I
-        )
-        value = clean_text(value)
-        if not value:
-            return
-
-        if re.fullmatch(r"\d{1,2}\s*[-:]\s*\d{1,2}", value):
-            return
-
-        norm = normalize_team(value)
-        if len(norm) < 2 or norm in seen:
-            return
-
-        # Reject obvious status/navigation fragments.
-        low = norm.lower()
-        bad = {
-            "مباريات اليوم", "النتائج", "والنتائج", "الدوري", "الإنجليزي",
-            "الممتاز", "today", "matches", "results", "football", "soccer",
-        }
-        if low in bad:
-            return
-
-        seen.add(norm)
-        candidates.append(value)
-
-    # Prefer explicit team-name/data-team-name elements.
     for selector in selectors:
         try:
-            for element in card.select(selector):
-                value = element.get("data-team-name", "") or element.get_text(" ", strip=True)
-                add(value)
+            elements = card.select(selector)
+
+            for element in elements:
+                value = clean_text(
+                    element.get_text(
+                        " ",
+                        strip=True,
+                    )
+                )
+
+                if not value:
+                    continue
+
+                value = re.sub(
+                    r"\b(?:FT|HT|LIVE|FIXTURE|RESULT)\b",
+                    " ",
+                    value,
+                    flags=re.I,
+                )
+
+                value = clean_text(value)
+
+                if not value:
+                    continue
+
+                # Do not accept score-only strings.
+                if re.fullmatch(
+                    r"\d{1,2}\s*[-:]\s*\d{1,2}",
+                    value,
+                ):
+                    continue
+
+                norm = normalize_team(value)
+
+                if len(norm) < 2:
+                    continue
+
+                if norm not in [
+                    normalize_team(x)
+                    for x in candidates
+                ]:
+                    candidates.append(value)
+
         except Exception:
             continue
-
-    # Last-resort fallback: only links with team-like class/id, not every link.
-    if len(candidates) < 2:
-        try:
-            for element in card.find_all("a"):
-                attrs = " ".join(str(element.get(k, "")) for k in ("class", "id", "href")).lower()
-                if any(x in attrs for x in ("team", "participant", "competitor", "club")):
-                    add(element.get_text(" ", strip=True))
-        except Exception:
-            pass
 
     return candidates
 
@@ -922,78 +791,149 @@ def parse_kooora(html):
     if not html:
         return []
 
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(
+        html,
+        "html.parser",
+    )
 
-    cards = soup.select(".fco-match-list-item")
-    if not cards:
-        cards = soup.select("[data-match-status]")
+    cards = soup.select(
+        ".fco-match-list-item"
+    )
 
     if not cards:
-        log("[KOOORA] No match cards found")
+        cards = soup.select(
+            "[data-match-status]"
+        )
+
+    if not cards:
+        log(
+            "[KOOORA] No match cards found"
+        )
         return []
 
     matches = []
-    counts = {"FIXTURE": 0, "LIVE": 0, "RESULT": 0}
-    skip_counts = {"NO_SCORE": 0, "NO_TEAMS": 0, "NO_PHASE": 0}
+
+    counts = {
+        "FIXTURE": 0,
+        "LIVE": 0,
+        "RESULT": 0,
+    }
 
     for card in cards:
         try:
-            status = clean_text(card.get("data-match-status", "")).upper()
+            status = clean_text(
+                card.get(
+                    "data-match-status",
+                    "",
+                )
+            ).upper()
+
             if status in counts:
                 counts[status] += 1
 
-            text = clean_text(card.get_text(" ", strip=True))
-            phase = detect_kooora_phase(card, status, text)
-            candidates = extract_team_candidates(card)
+            text = clean_text(
+                card.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
 
-            if len(candidates) < 2:
-                if status == "LIVE":
-                    skip_counts["NO_TEAMS"] += 1
+            home_score, away_score = extract_score(
+                text
+            )
+
+            if (
+                home_score is None
+                or away_score is None
+            ):
                 continue
 
-            home, away = candidates[0], candidates[1]
-            home_norm, away_norm = normalize_team(home), normalize_team(away)
+            candidates = extract_team_candidates(
+                card
+            )
+
+            if len(candidates) < 2:
+                continue
+
+            # Use the first two credible team candidates.
+            home = candidates[0]
+            away = candidates[1]
+
+            home_norm = normalize_team(home)
+            away_norm = normalize_team(away)
+
             if not home_norm or not away_norm:
                 continue
 
-            home_score, away_score = extract_kooora_score(card, text)
+            phase = ""
 
-            # FT must have a confirmed score. HT may legitimately lack a
-            # parsed score because the live score can be rendered separately.
-            if phase == "FT" and (home_score is None or away_score is None):
-                skip_counts["NO_SCORE"] += 1
+            if status == "RESULT":
+                phase = "FT"
+
+            elif status == "LIVE":
+                status_text = clean_text(
+                    " ".join(
+                        [
+                            text,
+                            " ".join(
+                                clean_text(
+                                    x.get_text(
+                                        " ",
+                                        strip=True,
+                                    )
+                                )
+                                for x in card.select(
+                                    ".fco-match-status"
+                                )
+                            ),
+                        ]
+                    )
+                ).lower()
+
+                if (
+                    "ht" in status_text
+                    or "half time" in status_text
+                    or "halbzeit" in status_text
+                    or "الشوط" in status_text
+                    or "بين الشوطين" in status_text
+                ):
+                    phase = "HT"
+
+            if phase not in {
+                "HT",
+                "FT",
+            }:
                 continue
 
-            if phase not in {"HT", "FT"}:
-                if status == "LIVE":
-                    skip_counts["NO_PHASE"] += 1
-                    if skip_counts["NO_PHASE"] <= 5:
-                        attr = _kooora_attribute_text(card)
-                        log(
-                            f"[KOOORA DEBUG] LIVE no HT/FT phase | "
-                            f"attrs={attr[:180]} | text={text[:220]}"
-                        )
-                continue
-
-            matches.append({
-                "home": home,
-                "away": away,
-                "home_norm": home_norm,
-                "away_norm": away_norm,
-                "home_score": home_score,
-                "away_score": away_score,
-                "phase": phase,
-            })
+            matches.append(
+                {
+                    "home": home,
+                    "away": away,
+                    "home_norm": home_norm,
+                    "away_norm": away_norm,
+                    "home_score": home_score,
+                    "away_score": away_score,
+                    "phase": phase,
+                }
+            )
 
         except Exception as exc:
-            log(f"[KOOORA] card parse error: {exc}")
+            log(
+                f"[KOOORA] card parse error: {exc}"
+            )
 
+    # Deduplicate.
     unique = {}
+
     for match in matches:
         key = (
-            match["home_norm"], match["away_norm"], match["phase"],
-            match["home_score"], match["away_score"],
+            match["home_norm"],
+            match["away_norm"],
+            match["phase"],
+            match["home_score"],
+            match["away_score"],
         )
+
         unique[key] = match
 
     result = list(unique.values())
@@ -1006,18 +946,13 @@ def parse_kooora(html):
         f"HT/FT={len(result)}"
     )
 
-    if counts["LIVE"]:
-        log(
-            f"[KOOORA DEBUG] LIVE skips: "
-            f"no_score={skip_counts['NO_SCORE']} "
-            f"no_teams={skip_counts['NO_TEAMS']} "
-            f"no_phase={skip_counts['NO_PHASE']}"
-        )
-
     for match in result[:60]:
         log(
-            f"[KOOORA] {match['phase']} {match['home']} "
-            f"{match['home_score']}-{match['away_score']} {match['away']}"
+            f"[KOOORA] {match['phase']} "
+            f"{match['home']} "
+            f"{match['home_score']}-"
+            f"{match['away_score']} "
+            f"{match['away']}"
         )
 
     return result
@@ -1038,10 +973,10 @@ def protection_detected(title, text, url):
     )
 
 
-async def safe_body_text(page):
+def safe_body_text(page):
     try:
         return clean_text(
-            await page.locator(
+            page.locator(
                 "body"
             ).inner_text(
                 timeout=5000
@@ -1073,7 +1008,7 @@ def likely_event_selector(selector):
     )
 
 
-async def get_event_blocks(page):
+def get_event_blocks(page):
     """
     Extract likely local event blocks from the DOM.
 
@@ -1097,12 +1032,8 @@ async def get_event_blocks(page):
             '[class*="Game"]',
             '[class*="participant"]',
             '[class*="competitor"]',
-            '[data-event-id]',
-            '[data-match-id]',
-            '[data-fixture-id]',
-            '[data-testid*="fixture"]',
-            '[data-testid*="event"]',
-            '[data-testid*="match"]'
+            'article',
+            'li'
         ];
 
         const output = [];
@@ -1126,11 +1057,15 @@ async def get_event_blocks(page):
                         .trim();
 
                     if (!text) continue;
+
                     if (text.length < 20) continue;
                     if (text.length > 2500) continue;
 
                     const rect = node.getBoundingClientRect();
-                    if (rect.width === 0 || rect.height === 0) continue;
+
+                    if (rect.width === 0 || rect.height === 0) {
+                        continue;
+                    }
 
                     const links = Array.from(
                         node.querySelectorAll("a[href]")
@@ -1143,8 +1078,11 @@ async def get_event_blocks(page):
                     }))
                     .filter(x => x.href);
 
-                    const key = text + "|" + (links[0]?.href || "");
+                    const key = text + "|" +
+                        (links[0]?.href || "");
+
                     if (seen.has(key)) continue;
+
                     seen.add(key);
 
                     output.push({
@@ -1153,7 +1091,10 @@ async def get_event_blocks(page):
                         selector: selector
                     });
 
-                    if (output.length >= 500) return output;
+                    if (output.length >= 500) {
+                        return output;
+                    }
+
                 } catch (_) {
                     continue;
                 }
@@ -1165,12 +1106,18 @@ async def get_event_blocks(page):
     """
 
     try:
-        blocks = await page.evaluate(script)
+        blocks = page.evaluate(script)
+
         if not isinstance(blocks, list):
             return []
+
         return blocks[:MAX_EVENT_BLOCKS]
+
     except Exception as exc:
-        log(f"[BROWSER] event block extraction error: {exc}")
+        log(
+            f"[BROWSER] event block extraction error: {exc}"
+        )
+
         return []
 
 
@@ -1298,22 +1245,28 @@ def strict_event_window_candidates(
         normalized_page
     )
 
-    # Locate token occurrences with token boundaries.
-    # This prevents "live", "ft", or team fragments from matching inside
-    # unrelated words.
+    # Locate token occurrences in the normalized text.
     positions = []
 
-    for token in set(home_tokens + away_tokens):
-        if not token:
-            continue
+    for token in set(
+        home_tokens + away_tokens
+    ):
+        start = 0
 
-        pattern = re.compile(
-            rf"(?<![\w]){re.escape(token)}(?![\w])",
-            flags=re.I,
-        )
+        while True:
+            index = text_norm.find(
+                token,
+                start,
+            )
 
-        for found in pattern.finditer(text_norm):
-            positions.append((found.start(), token))
+            if index < 0:
+                break
+
+            positions.append(
+                (index, token)
+            )
+
+            start = index + len(token)
 
     if not positions:
         return []
@@ -1421,9 +1374,9 @@ def same_domain(base_url, target_url):
         return False
 
 
-async def collect_links(page):
+def collect_links(page):
     try:
-        links = await page.locator(
+        links = page.locator(
             "a[href]"
         ).evaluate_all(
             """
@@ -1510,12 +1463,12 @@ def link_contains_team(link, match):
     )
 
 
-async def collect_candidate_links(
+def collect_candidate_links(
     page,
     base_url,
     match,
 ):
-    links = await collect_links(page)
+    links = collect_links(page)
 
     candidates = []
 
@@ -1573,7 +1526,7 @@ async def collect_candidate_links(
 # INTERNAL SEARCH
 # ============================================================
 
-async def find_search_inputs(page):
+def find_search_inputs(page):
     selectors = [
         "input[type='search']",
         "input[placeholder*='Search']",
@@ -1591,11 +1544,18 @@ async def find_search_inputs(page):
 
     for selector in selectors:
         try:
-            locator = page.locator(selector)
-            count = await locator.count()
+            locator = page.locator(
+                selector
+            )
 
-            for index in range(min(count, 5)):
-                result.append(locator.nth(index))
+            count = locator.count()
+
+            for index in range(
+                min(count, 5)
+            ):
+                result.append(
+                    locator.nth(index)
+                )
 
         except Exception:
             continue
@@ -1603,10 +1563,12 @@ async def find_search_inputs(page):
     return result
 
 
-async def internal_search(
+def internal_search(
     page,
     bookmaker,
     match,
+    homepage_url,
+    deadline=None,
 ):
     """
     Try normal visible-site search controls.
@@ -1633,14 +1595,17 @@ async def internal_search(
     ]
 
     for first, second in searches:
+        if deadline is not None and time.monotonic() >= deadline:
+            return {"status": "TIMEOUT", "links": []}
+
         try:
-            await page.goto(
-                page.url,
+            page.goto(
+                homepage_url,
                 wait_until="domcontentloaded",
                 timeout=BROWSER_TIMEOUT_MS,
             )
 
-            await page.wait_for_timeout(
+            page.wait_for_timeout(
                 min(
                     1500,
                     BROWSER_WAIT_MS,
@@ -1650,7 +1615,7 @@ async def internal_search(
         except Exception:
             pass
 
-        inputs = await find_search_inputs(
+        inputs = find_search_inputs(
             page
         )
 
@@ -1658,26 +1623,28 @@ async def internal_search(
             continue
 
         for search_input in inputs[:3]:
+            if deadline is not None and time.monotonic() >= deadline:
+                return {"status": "TIMEOUT", "links": []}
             try:
-                await search_input.fill(
+                search_input.fill(
                     ""
                 )
 
-                await search_input.fill(
+                search_input.fill(
                     first
                 )
 
-                await search_input.press(
+                search_input.press(
                     "Enter"
                 )
 
-                await page.wait_for_timeout(
+                page.wait_for_timeout(
                     2500
                 )
 
-                title = await page.title()
+                title = page.title()
 
-                text = await safe_body_text(
+                text = safe_body_text(
                     page
                 )
 
@@ -1697,7 +1664,7 @@ async def internal_search(
                         "links": [],
                     }
 
-                links = await collect_candidate_links(
+                links = collect_candidate_links(
                     page,
                     page.url,
                     match,
@@ -1822,7 +1789,7 @@ def verify_event_window(
     }
 
 
-async def verify_page_for_match(
+def verify_page_for_match(
     page,
     match,
     bookmaker,
@@ -1833,9 +1800,9 @@ async def verify_page_for_match(
     NEVER classify the whole page as PREMATCH.
     """
 
-    title = await page.title()
+    title = page.title()
 
-    body_text = await safe_body_text(
+    body_text = safe_body_text(
         page
     )
 
@@ -1849,7 +1816,7 @@ async def verify_page_for_match(
             "matches": [],
         }
 
-    event_blocks = await get_event_blocks(
+    event_blocks = get_event_blocks(
         page
     )
 
@@ -1892,12 +1859,21 @@ async def verify_page_for_match(
 # ONE BOOKMAKER
 # ============================================================
 
-async def browser_check_one_async(
+def browser_check_one(
     bookmaker,
     homepage_url,
     matches,
 ):
-    """One Chromium instance per bookmaker using Playwright Async API."""
+    """
+    One Chromium instance per bookmaker.
+
+    Flow:
+        Homepage
+        -> visible event/sport links
+        -> internal search
+        -> candidate event
+        -> strict local event verification
+    """
 
     if not PLAYWRIGHT_AVAILABLE:
         return {
@@ -1910,99 +1886,113 @@ async def browser_check_one_async(
     browser = None
     context = None
     page = None
-    playwright_cm = None
     bookmaker_started = time.monotonic()
+    bookmaker_deadline = bookmaker_started + BOOKMAKER_MAX_SECONDS
 
-    log(f"[{bookmaker}] START | targets={len(matches)}")
+    log(f"[{bookmaker}] START | targets={len(matches)} | budget={BOOKMAKER_MAX_SECONDS:.0f}s")
 
     try:
-        playwright_cm = async_playwright()
-        playwright = await playwright_cm.start()
+        with sync_playwright() as p:
 
-        log(
-            f"[{bookmaker}] Launching Chromium | "
-            f"PLAYWRIGHT_BROWSERS_PATH={os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')}"
-        )
-
-        browser = await playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
-        )
-
-        context = await browser.new_context(
-            viewport={"width": 1440, "height": 1000},
-            locale="de-DE",
-            timezone_id="Europe/Berlin",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-        )
-
-        page = await context.new_page()
-
-        try:
-            response = await page.goto(
-                homepage_url,
-                wait_until="domcontentloaded",
-                timeout=BROWSER_TIMEOUT_MS,
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
             )
-            await page.wait_for_timeout(BROWSER_WAIT_MS)
 
-        except PlaywrightTimeoutError:
+            context = browser.new_context(
+                viewport={
+                    "width": 1440,
+                    "height": 1000,
+                },
+                locale="de-DE",
+                timezone_id="Europe/Berlin",
+                user_agent=(
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+            )
+
+            page = context.new_page()
+
+            # ------------------------------------------------
+            # HOMEPAGE
+            # ------------------------------------------------
+
+            try:
+                response = page.goto(
+                    homepage_url,
+                    wait_until="domcontentloaded",
+                    timeout=BROWSER_TIMEOUT_MS,
+                )
+
+                page.wait_for_timeout(
+                    BROWSER_WAIT_MS
+                )
+
+            except PlaywrightTimeoutError:
+                log(
+                    f"[{bookmaker}] homepage timeout | elapsed={time.monotonic() - bookmaker_started:.1f}s"
+                )
+
+                return {
+                    "bookmaker": bookmaker,
+                    "status": "TIMEOUT",
+                    "final_url": page.url,
+                    "matches": [],
+                }
+
+            except Exception as exc:
+                log(
+                    f"[{bookmaker}] homepage error: {exc} | elapsed={time.monotonic() - bookmaker_started:.1f}s"
+                )
+
+                return {
+                    "bookmaker": bookmaker,
+                    "status": "ERROR",
+                    "final_url": page.url,
+                    "matches": [],
+                }
+
+            title = page.title()
+
+            body_text = safe_body_text(
+                page
+            )
+
+            http_status = (
+                response.status
+                if response
+                else 0
+            )
+
             log(
-                f"[{bookmaker}] homepage timeout | "
-                f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
-            )
-            return {
-                "bookmaker": bookmaker,
-                "status": "TIMEOUT",
-                "final_url": page.url,
-                "matches": [],
-            }
-        except Exception as exc:
-            log(
-                f"[{bookmaker}] homepage error: {exc} | "
-                f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
-            )
-            return {
-                "bookmaker": bookmaker,
-                "status": "ERROR",
-                "final_url": page.url,
-                "matches": [],
-            }
-
-        title = await page.title()
-        body_text = await safe_body_text(page)
-        http_status = response.status if response else 0
-
-        log(
-            f"[{bookmaker}] HTTP={http_status} "
-            f"final={page.url} text={len(body_text)}"
-        )
-
-        if protection_detected(title, body_text, page.url):
-            log(f"[{bookmaker}] CAPTCHA/Cloudflare -> SKIP")
-            return {
-                "bookmaker": bookmaker,
-                "status": "CAPTCHA",
-                "final_url": page.url,
-                "matches": [],
-            }
-
-        all_confirmed = []
-
-        for match in matches:
-            verification = await verify_page_for_match(
-                page, match, bookmaker
+                f"[{bookmaker}] "
+                f"HTTP={http_status} "
+                f"final={page.url} "
+                f"text={len(body_text)}"
             )
 
-            if verification["status"] == "CAPTCHA":
+            # ------------------------------------------------
+            # PROTECTION
+            # ------------------------------------------------
+
+            if protection_detected(
+                title,
+                body_text,
+                page.url,
+            ):
+                log(
+                    f"[{bookmaker}] "
+                    f"CAPTCHA/Cloudflare -> SKIP"
+                )
+
                 return {
                     "bookmaker": bookmaker,
                     "status": "CAPTCHA",
@@ -2010,135 +2000,300 @@ async def browser_check_one_async(
                     "matches": [],
                 }
 
-            for found in verification.get("matches", []):
-                found["match"] = match
-                all_confirmed.append(found)
+            # ------------------------------------------------
+            # EACH TARGET MATCH
+            # ------------------------------------------------
 
-            if verification.get("matches"):
-                continue
+            all_confirmed = []
 
-            candidate_links = await collect_candidate_links(
-                page, page.url, match
-            )
+            for match in matches:
 
-            checked_links = set()
+                if time.monotonic() >= bookmaker_deadline:
+                    log(f"[{bookmaker}] budget exceeded -> TIMEOUT")
+                    return {
+                        "bookmaker": bookmaker,
+                        "status": "TIMEOUT",
+                        "final_url": page.url,
+                        "matches": all_confirmed,
+                    }
 
-            for candidate_url in candidate_links[:25]:
-                if candidate_url in checked_links:
+                # --------------------------------------------
+                # A. Direct homepage rendered DOM check
+                # --------------------------------------------
+
+                verification = verify_page_for_match(
+                    page,
+                    match,
+                    bookmaker,
+                )
+
+                if verification["status"] == "CAPTCHA":
+                    return {
+                        "bookmaker": bookmaker,
+                        "status": "CAPTCHA",
+                        "final_url": page.url,
+                        "matches": [],
+                    }
+
+                for found in verification.get(
+                    "matches",
+                    [],
+                ):
+                    found["match"] = match
+                    all_confirmed.append(
+                        found
+                    )
+
+                if verification.get(
+                    "matches"
+                ):
                     continue
-                checked_links.add(candidate_url)
+
+                # --------------------------------------------
+                # B. Homepage -> event/sport links
+                # --------------------------------------------
+
+                candidate_links = (
+                    collect_candidate_links(
+                        page,
+                        page.url,
+                        match,
+                    )
+                )
+
+                checked_links = set()
+
+                for candidate_url in candidate_links[:25]:
+
+                    if time.monotonic() >= bookmaker_deadline:
+                        log(f"[{bookmaker}] budget exceeded during link checks -> TIMEOUT")
+                        return {
+                            "bookmaker": bookmaker,
+                            "status": "TIMEOUT",
+                            "final_url": page.url,
+                            "matches": all_confirmed,
+                        }
+
+                    if candidate_url in checked_links:
+                        continue
+
+                    checked_links.add(
+                        candidate_url
+                    )
+
+                    try:
+                        page.goto(
+                            candidate_url,
+                            wait_until="domcontentloaded",
+                            timeout=BROWSER_TIMEOUT_MS,
+                        )
+
+                        page.wait_for_timeout(
+                            min(
+                                BROWSER_WAIT_MS,
+                                3000,
+                            )
+                        )
+
+                    except Exception:
+                        continue
+
+                    title = page.title()
+
+                    body_text = safe_body_text(
+                        page
+                    )
+
+                    if protection_detected(
+                        title,
+                        body_text,
+                        page.url,
+                    ):
+                        log(
+                            f"[{bookmaker}] "
+                            f"protected event page -> skip"
+                        )
+                        continue
+
+                    verification = verify_page_for_match(
+                        page,
+                        match,
+                        bookmaker,
+                    )
+
+                    for found in verification.get(
+                        "matches",
+                        [],
+                    ):
+                        found["match"] = match
+
+                        if not found.get(
+                            "href"
+                        ):
+                            found["href"] = (
+                                page.url
+                            )
+
+                        all_confirmed.append(
+                            found
+                        )
+
+                    if verification.get(
+                        "matches"
+                    ):
+                        break
+
+                # --------------------------------------------
+                # C. Internal search
+                # --------------------------------------------
+
+                if any(
+                    x.get("match") == match
+                    for x in all_confirmed
+                ):
+                    continue
 
                 try:
-                    await page.goto(
-                        candidate_url,
+                    page.goto(
+                        homepage_url,
                         wait_until="domcontentloaded",
                         timeout=BROWSER_TIMEOUT_MS,
                     )
-                    await page.wait_for_timeout(
-                        min(BROWSER_WAIT_MS, 3000)
+
+                    page.wait_for_timeout(
+                        min(
+                            BROWSER_WAIT_MS,
+                            2500,
+                        )
                     )
+
                 except Exception:
                     continue
 
-                title = await page.title()
-                body_text = await safe_body_text(page)
-
-                if protection_detected(title, body_text, page.url):
-                    log(f"[{bookmaker}] protected event page -> skip")
-                    continue
-
-                verification = await verify_page_for_match(
-                    page, match, bookmaker
-                )
-
-                for found in verification.get("matches", []):
-                    found["match"] = match
-                    if not found.get("href"):
-                        found["href"] = page.url
-                    all_confirmed.append(found)
-
-                if verification.get("matches"):
-                    break
-
-            if any(x.get("match") == match for x in all_confirmed):
-                continue
-
-            try:
-                await page.goto(
+                search_result = internal_search(
+                    page,
+                    bookmaker,
+                    match,
                     homepage_url,
-                    wait_until="domcontentloaded",
-                    timeout=BROWSER_TIMEOUT_MS,
+                    deadline=bookmaker_deadline,
                 )
-                await page.wait_for_timeout(
-                    min(BROWSER_WAIT_MS, 2500)
-                )
-            except Exception:
-                continue
 
-            search_result = await internal_search(
-                page, bookmaker, match
-            )
-
-            if search_result["status"] == "CAPTCHA":
-                continue
-
-            for search_url in search_result.get("links", [])[:20]:
-                try:
-                    await page.goto(
-                        search_url,
-                        wait_until="domcontentloaded",
-                        timeout=BROWSER_TIMEOUT_MS,
-                    )
-                    await page.wait_for_timeout(
-                        min(BROWSER_WAIT_MS, 3000)
-                    )
-                except Exception:
+                if search_result["status"] == "CAPTCHA":
                     continue
 
-                title = await page.title()
-                body_text = await safe_body_text(page)
+                for search_url in search_result.get(
+                    "links",
+                    []
+                )[:20]:
 
-                if protection_detected(title, body_text, page.url):
-                    continue
+                    if time.monotonic() >= bookmaker_deadline:
+                        log(f"[{bookmaker}] budget exceeded during search links -> TIMEOUT")
+                        return {
+                            "bookmaker": bookmaker,
+                            "status": "TIMEOUT",
+                            "final_url": page.url,
+                            "matches": all_confirmed,
+                        }
 
-                verification = await verify_page_for_match(
-                    page, match, bookmaker
+                    try:
+                        page.goto(
+                            search_url,
+                            wait_until="domcontentloaded",
+                            timeout=BROWSER_TIMEOUT_MS,
+                        )
+
+                        page.wait_for_timeout(
+                            min(
+                                BROWSER_WAIT_MS,
+                                3000,
+                            )
+                        )
+
+                    except Exception:
+                        continue
+
+                    title = page.title()
+
+                    body_text = safe_body_text(
+                        page
+                    )
+
+                    if protection_detected(
+                        title,
+                        body_text,
+                        page.url,
+                    ):
+                        continue
+
+                    verification = verify_page_for_match(
+                        page,
+                        match,
+                        bookmaker,
+                    )
+
+                    for found in verification.get(
+                        "matches",
+                        [],
+                    ):
+                        found["match"] = match
+
+                        if not found.get(
+                            "href"
+                        ):
+                            found["href"] = (
+                                page.url
+                            )
+
+                        all_confirmed.append(
+                            found
+                        )
+
+                    if verification.get(
+                        "matches"
+                    ):
+                        break
+
+            # ------------------------------------------------
+            # DEDUP CONFIRMED RESULTS
+            # ------------------------------------------------
+
+            unique = {}
+
+            for found in all_confirmed:
+                match = found["match"]
+
+                key = (
+                    match["home_norm"],
+                    match["away_norm"],
+                    match["phase"],
+                    found.get(
+                        "href",
+                        "",
+                    ),
                 )
 
-                for found in verification.get("matches", []):
-                    found["match"] = match
-                    if not found.get("href"):
-                        found["href"] = page.url
-                    all_confirmed.append(found)
+                unique[key] = found
 
-                if verification.get("matches"):
-                    break
-
-        unique = {}
-        for found in all_confirmed:
-            match = found["match"]
-            key = (
-                match["home_norm"],
-                match["away_norm"],
-                match["phase"],
-                found.get("href", ""),
+            confirmed = list(
+                unique.values()
             )
-            unique[key] = found
 
-        confirmed = list(unique.values())
-        status = "CONFIRMED" if confirmed else "NOT_CONFIRMED"
+            if confirmed:
+                status = "CONFIRMED"
+            else:
+                status = "NOT_CONFIRMED"
 
-        log(
-            f"[{bookmaker}] status={status} confirmed={len(confirmed)} "
-            f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
-        )
+            log(
+                f"[{bookmaker}] status={status} confirmed={len(confirmed)} "
+                f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
+            )
 
-        return {
-            "bookmaker": bookmaker,
-            "status": status,
-            "final_url": page.url,
-            "matches": confirmed,
-        }
+            return {
+                "bookmaker": bookmaker,
+                "status": status,
+                "final_url": page.url,
+                "matches": confirmed,
+            }
 
     except Exception as exc:
         log(
@@ -2146,6 +2301,7 @@ async def browser_check_one_async(
             f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
         )
         log(traceback.format_exc())
+
         return {
             "bookmaker": bookmaker,
             "status": "ERROR",
@@ -2158,27 +2314,21 @@ async def browser_check_one_async(
 
         try:
             if page:
-                await page.close(run_before_unload=False)
+                page.close(run_before_unload=False)
         except Exception as exc:
             log(f"[{bookmaker}] page close warning: {exc}")
 
         try:
             if context:
-                await context.close()
+                context.close()
         except Exception as exc:
             log(f"[{bookmaker}] context close warning: {exc}")
 
         try:
             if browser:
-                await browser.close()
+                browser.close()
         except Exception as exc:
             log(f"[{bookmaker}] browser close warning: {exc}")
-
-        try:
-            if playwright_cm:
-                await playwright_cm.__aexit__(None, None, None)
-        except Exception as exc:
-            log(f"[{bookmaker}] Playwright shutdown warning: {exc}")
 
         log(
             f"[{bookmaker}] CLEANUP complete | "
@@ -2186,54 +2336,6 @@ async def browser_check_one_async(
             f"total={time.monotonic() - bookmaker_started:.1f}s"
         )
 
-
-def browser_check_one(bookmaker, homepage_url, matches):
-    """Sync wrapper that always runs the Async Playwright worker safely."""
-    import asyncio
-    import threading as _threading
-
-    try:
-        asyncio.get_running_loop()
-        running = True
-    except RuntimeError:
-        running = False
-
-    if not running:
-        return asyncio.run(
-            browser_check_one_async(bookmaker, homepage_url, matches)
-        )
-
-    result_holder = {}
-    error_holder = {}
-
-    def runner():
-        try:
-            result_holder["result"] = asyncio.run(
-                browser_check_one_async(bookmaker, homepage_url, matches)
-            )
-        except Exception as exc:
-            error_holder["error"] = exc
-
-    worker = _threading.Thread(
-        target=runner,
-        daemon=True,
-        name=f"playwright-{bookmaker}",
-    )
-    worker.start()
-    worker.join()
-
-    if "error" in error_holder:
-        raise error_holder["error"]
-
-    return result_holder.get(
-        "result",
-        {
-            "bookmaker": bookmaker,
-            "status": "ERROR",
-            "final_url": homepage_url,
-            "matches": [],
-        },
-    )
 
 # ============================================================
 # BOOKMAKER SCAN
@@ -2714,8 +2816,8 @@ def scanner_loop():
         f"[START] Playwright="
         f"{'AVAILABLE' if PLAYWRIGHT_AVAILABLE else 'NOT INSTALLED'}"
     )
-    log("[START] Playwright API=ASYNC (safe for asyncio and Render)")
-    log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms")
+    log("[START] Playwright API=SYNC (thread-isolated, safe for Render)")
+    log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms | BOOKMAKER_MAX_SECONDS={BOOKMAKER_MAX_SECONDS:.0f}s")
     log("[START] Health endpoint: /health")
 
     if not PLAYWRIGHT_AVAILABLE:
@@ -2832,12 +2934,9 @@ if __name__ == "__main__":
     )
 
     # --------------------------------------------------------
-    # STARTUP TESTS
+    # TELEGRAM TEST MESSAGE
+    # Sends once on every process start.
     # --------------------------------------------------------
-    log(
-        "--- [TEST MESSAGE] V3.3 Diagnostic: "
-        "نظام الفحص يعمل بشكل سليم ---"
-    )
     telegram_send_test_message()
 
     # One scanner thread only.
