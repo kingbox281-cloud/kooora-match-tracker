@@ -1,5 +1,9 @@
 import os
+
+# Keep Playwright browsers inside the application environment on Render.
+# IMPORTANT: this must be set BEFORE importing Playwright.
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+
 import re
 import time
 import threading
@@ -81,7 +85,7 @@ def get_scanner_state():
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_3"
+APP_VERSION = "KOOORA_BROWSER_V3_4_RENDER"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -309,6 +313,9 @@ def health():
         "status": "ok",
         "version": APP_VERSION,
         "playwright": PLAYWRIGHT_AVAILABLE,
+        "playwright_browsers_path": os.environ.get(
+            "PLAYWRIGHT_BROWSERS_PATH", ""
+        ),
         "scan_seconds": SCAN_SECONDS,
         "workers": MAX_BROWSER_WORKERS,
         "min_match_confidence": MIN_MATCH_CONFIDENCE,
@@ -565,10 +572,30 @@ def pair_match_score(home, away, local_text):
 # ============================================================
 
 def contains_marker(text, markers):
+    """
+    Conservative marker detection.
+
+    Short markers (ft / ht / live) are matched as tokens so that a random
+    substring inside a team name, URL, or unrelated word cannot change the
+    event status.
+    """
     low = clean_text(text).lower()
+    if not low:
+        return False
 
     for marker in markers:
-        if marker.lower() in low:
+        marker = clean_text(marker).lower()
+        if not marker:
+            continue
+
+        # Very short markers must be token/boundary based.
+        if marker in {"ft", "ht", "live"}:
+            if re.search(rf"(?<![\w]){re.escape(marker)}(?![\w])", low):
+                return True
+            continue
+
+        # Arabic / multi-word markers and normal phrases.
+        if marker in low:
             return True
 
     return False
@@ -691,7 +718,6 @@ def extract_score(text):
 
     patterns = [
         r"\b(\d{1,2})\s*[-:]\s*(\d{1,2})\b",
-        r"\b(\d{1,2})\s*:\s*(\d{1,2})\b",
     ]
 
     for pattern in patterns:
@@ -742,8 +768,7 @@ def _kooora_attribute_text(tag):
 
 
 def _kooora_has_explicit_marker(text, markers):
-    low = clean_text(text).lower()
-    return any(marker.lower() in low for marker in markers)
+    return contains_marker(text, markers)
 
 
 def detect_kooora_phase(card, status, text):
@@ -1072,8 +1097,12 @@ def get_event_blocks(page):
             '[class*="Game"]',
             '[class*="participant"]',
             '[class*="competitor"]',
-            'article',
-            'li'
+            '[data-event-id]',
+            '[data-match-id]',
+            '[data-fixture-id]',
+            '[data-testid*="fixture"]',
+            '[data-testid*="event"]',
+            '[data-testid*="match"]'
         ];
 
         const output = [];
@@ -1285,28 +1314,22 @@ def strict_event_window_candidates(
         normalized_page
     )
 
-    # Locate token occurrences in the normalized text.
+    # Locate token occurrences with token boundaries.
+    # This prevents "live", "ft", or team fragments from matching inside
+    # unrelated words.
     positions = []
 
-    for token in set(
-        home_tokens + away_tokens
-    ):
-        start = 0
+    for token in set(home_tokens + away_tokens):
+        if not token:
+            continue
 
-        while True:
-            index = text_norm.find(
-                token,
-                start,
-            )
+        pattern = re.compile(
+            rf"(?<![\w]){re.escape(token)}(?![\w])",
+            flags=re.I,
+        )
 
-            if index < 0:
-                break
-
-            positions.append(
-                (index, token)
-            )
-
-            start = index + len(token)
+        for found in pattern.finditer(text_norm):
+            positions.append((found.start(), token))
 
     if not positions:
         return []
@@ -1925,6 +1948,11 @@ def browser_check_one(
 
     try:
         with sync_playwright() as p:
+
+            log(
+                f"[{bookmaker}] Launching Chromium | "
+                f"PLAYWRIGHT_BROWSERS_PATH={os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')}"
+            )
 
             browser = p.chromium.launch(
                 headless=True,
