@@ -694,84 +694,200 @@ def extract_score(text):
     ]
 
     for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-        )
-
+        match = re.search(pattern, text)
         if match:
-            return (
-                int(match.group(1)),
-                int(match.group(2)),
-            )
+            return int(match.group(1)), int(match.group(2))
+
+    return None, None
+
+
+def _kooora_attribute_text(tag):
+    """Collect status/phase-like DOM attributes from a Kooora card."""
+    values = []
+
+    try:
+        for key in (
+            "data-match-status", "data-status", "data-phase", "data-period",
+            "data-state", "data-match-state", "data-match-phase",
+            "aria-label", "title", "alt", "class",
+        ):
+            value = tag.get(key, "")
+            if isinstance(value, (list, tuple)):
+                value = " ".join(str(x) for x in value)
+            if value:
+                values.append(str(value))
+    except Exception:
+        pass
+
+    # Also inspect descendants whose class/id suggests status/phase/state.
+    try:
+        for child in tag.find_all(True):
+            attrs = " ".join(
+                str(child.get(k, ""))
+                for k in ("class", "id", "data-status", "data-phase", "data-period", "data-state")
+            ).lower()
+            if any(x in attrs for x in ("status", "phase", "period", "state", "minute", "timer")):
+                txt = clean_text(child.get_text(" ", strip=True))
+                if txt:
+                    values.append(txt)
+                for k in ("data-status", "data-phase", "data-period", "data-state", "aria-label", "title"):
+                    v = child.get(k, "")
+                    if v:
+                        values.append(str(v))
+    except Exception:
+        pass
+
+    return clean_text(" | ".join(values))
+
+
+def _kooora_has_explicit_marker(text, markers):
+    low = clean_text(text).lower()
+    return any(marker.lower() in low for marker in markers)
+
+
+def detect_kooora_phase(card, status, text):
+    """
+    Conservative Kooora phase detection.
+
+    Priority:
+      1) explicit result card -> FT
+      2) explicit HT/halftime marker -> HT
+      3) explicit FT marker -> FT
+      4) otherwise unknown
+
+    Generic words such as 'final' are deliberately NOT enough on a LIVE card,
+    because league/navigation text can contain them and create false FT states.
+    """
+    if status == "RESULT":
+        return "FT"
+
+    attr_text = _kooora_attribute_text(card)
+    combined = clean_text(f"{attr_text} | {text}").lower()
+
+    ht_markers = [
+        "ht", "half time", "halftime", "half-time", "halbzeit", "pause",
+        "الشوط الأول", "الشوط الاول", "بين الشوطين", "استراحة",
+        "نهاية الشوط الأول", "نهاية الشوط الاول", "نصف الوقت",
+    ]
+    ft_markers = [
+        "انتهت", "انتهى", "full time", "full-time", "finished",
+        "match ended", "spiel beendet", "beendet", "endstand", "abpfiff",
+        "النهاية", "انتهت المباراة", "انتهى اللقاء", "نهاية المباراة",
+    ]
+
+    # On a LIVE card, HT is the first valid state. Do not use generic
+    # 'final'/'finish' words from unrelated page text.
+    if status == "LIVE":
+        if _kooora_has_explicit_marker(combined, ht_markers):
+            return "HT"
+        if _kooora_has_explicit_marker(combined, ft_markers):
+            return "FT"
+        return ""
+
+    # For cards without a reliable data status, explicit markers still work.
+    if _kooora_has_explicit_marker(combined, ht_markers):
+        return "HT"
+    if _kooora_has_explicit_marker(combined, ft_markers):
+        return "FT"
+
+    return ""
+
+
+def extract_kooora_score(card, text):
+    """Try visible text first, then score-like DOM attributes/elements."""
+    score = extract_score(text)
+    if score != (None, None):
+        return score
+
+    try:
+        for child in card.find_all(True):
+            attrs = " ".join(
+                str(child.get(k, ""))
+                for k in ("class", "id", "data-score", "data-home-score", "data-away-score")
+            ).lower()
+            if not any(x in attrs for x in ("score", "result", "goals")):
+                continue
+
+            values = []
+            for k in ("data-score", "data-home-score", "data-away-score"):
+                v = child.get(k, "")
+                if v != "":
+                    values.append(str(v))
+            values.append(child.get_text(" ", strip=True))
+            sc = extract_score(clean_text(" ".join(values)))
+            if sc != (None, None):
+                return sc
+    except Exception:
+        pass
 
     return None, None
 
 
 def extract_team_candidates(card):
-    """
-    Kooora DOM varies over time, so use several likely selectors.
-    """
-
+    """Extract likely team names while filtering navigation/status noise."""
     selectors = [
         ".fco-team-name",
-        ".team-name",
+        ".fco-team-name a",
         "[class*='team-name']",
         "[class*='teamName']",
         "[class*='participant']",
         "[class*='competitor']",
-        "a",
+        "[data-team-name]",
     ]
 
     candidates = []
+    seen = set()
 
+    def add(value):
+        value = clean_text(value)
+        if not value:
+            return
+
+        value = re.sub(
+            r"\b(?:FT|HT|LIVE|FIXTURE|RESULT|PREMATCH|SCHEDULED)\b",
+            " ", value, flags=re.I
+        )
+        value = clean_text(value)
+        if not value:
+            return
+
+        if re.fullmatch(r"\d{1,2}\s*[-:]\s*\d{1,2}", value):
+            return
+
+        norm = normalize_team(value)
+        if len(norm) < 2 or norm in seen:
+            return
+
+        # Reject obvious status/navigation fragments.
+        low = norm.lower()
+        bad = {
+            "مباريات اليوم", "النتائج", "والنتائج", "الدوري", "الإنجليزي",
+            "الممتاز", "today", "matches", "results", "football", "soccer",
+        }
+        if low in bad:
+            return
+
+        seen.add(norm)
+        candidates.append(value)
+
+    # Prefer explicit team-name/data-team-name elements.
     for selector in selectors:
         try:
-            elements = card.select(selector)
-
-            for element in elements:
-                value = clean_text(
-                    element.get_text(
-                        " ",
-                        strip=True,
-                    )
-                )
-
-                if not value:
-                    continue
-
-                value = re.sub(
-                    r"\b(?:FT|HT|LIVE|FIXTURE|RESULT)\b",
-                    " ",
-                    value,
-                    flags=re.I,
-                )
-
-                value = clean_text(value)
-
-                if not value:
-                    continue
-
-                # Do not accept score-only strings.
-                if re.fullmatch(
-                    r"\d{1,2}\s*[-:]\s*\d{1,2}",
-                    value,
-                ):
-                    continue
-
-                norm = normalize_team(value)
-
-                if len(norm) < 2:
-                    continue
-
-                if norm not in [
-                    normalize_team(x)
-                    for x in candidates
-                ]:
-                    candidates.append(value)
-
+            for element in card.select(selector):
+                value = element.get("data-team-name", "") or element.get_text(" ", strip=True)
+                add(value)
         except Exception:
             continue
+
+    # Last-resort fallback: only links with team-like class/id, not every link.
+    if len(candidates) < 2:
+        try:
+            for element in card.find_all("a"):
+                attrs = " ".join(str(element.get(k, "")) for k in ("class", "id", "href")).lower()
+                if any(x in attrs for x in ("team", "participant", "competitor", "club")):
+                    add(element.get_text(" ", strip=True))
+        except Exception:
+            pass
 
     return candidates
 
@@ -780,92 +896,28 @@ def parse_kooora(html):
     if not html:
         return []
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
-    )
+    soup = BeautifulSoup(html, "html.parser")
 
-    cards = soup.select(
-        ".fco-match-list-item"
-    )
+    cards = soup.select(".fco-match-list-item")
+    if not cards:
+        cards = soup.select("[data-match-status]")
 
     if not cards:
-        cards = soup.select(
-            "[data-match-status]"
-        )
-
-    if not cards:
-        log(
-            "[KOOORA] No match cards found"
-        )
+        log("[KOOORA] No match cards found")
         return []
 
     matches = []
-
-    counts = {
-        "FIXTURE": 0,
-        "LIVE": 0,
-        "RESULT": 0,
-    }
-
-    skip_counts = {
-        "NO_SCORE": 0,
-        "NO_TEAMS": 0,
-        "NO_PHASE": 0,
-    }
+    counts = {"FIXTURE": 0, "LIVE": 0, "RESULT": 0}
+    skip_counts = {"NO_SCORE": 0, "NO_TEAMS": 0, "NO_PHASE": 0}
 
     for card in cards:
         try:
-            status = clean_text(
-                card.get(
-                    "data-match-status",
-                    "",
-                )
-            ).upper()
-
+            status = clean_text(card.get("data-match-status", "")).upper()
             if status in counts:
                 counts[status] += 1
 
-            text = clean_text(
-                card.get_text(
-                    " ",
-                    strip=True,
-                )
-            )
-
-            # Determine the phase BEFORE requiring a score.
-            # Kooora may expose a LIVE/HT card whose score is rendered
-            # in a separate JS element and is therefore not present in
-            # the parsed card text. HT detection must not depend on it.
-            phase = ""
-            status_text = text.lower()
-
-            if status == "RESULT":
-                phase = "FT"
-            elif status == "LIVE":
-                if (
-                    "ht" in status_text
-                    or "half time" in status_text
-                    or "halftime" in status_text
-                    or "half-time" in status_text
-                    or "halbzeit" in status_text
-                    or "pause" in status_text
-                    or "الشوط" in status_text
-                    or "بين الشوطين" in status_text
-                    or "استراحة" in status_text
-                    or "نهاية الشوط الأول" in status_text
-                    or "نصف الوقت" in status_text
-                ):
-                    phase = "HT"
-                elif (
-                    "انتهت" in status_text
-                    or "انتهى" in status_text
-                    or "full time" in status_text
-                    or "finished" in status_text
-                    or "final" in status_text
-                ):
-                    phase = "FT"
-
+            text = clean_text(card.get_text(" ", strip=True))
+            phase = detect_kooora_phase(card, status, text)
             candidates = extract_team_candidates(card)
 
             if len(candidates) < 2:
@@ -873,76 +925,49 @@ def parse_kooora(html):
                     skip_counts["NO_TEAMS"] += 1
                 continue
 
-            # Use the first two credible team candidates.
-            home = candidates[0]
-            away = candidates[1]
-
-            home_norm = normalize_team(home)
-            away_norm = normalize_team(away)
-
+            home, away = candidates[0], candidates[1]
+            home_norm, away_norm = normalize_team(home), normalize_team(away)
             if not home_norm or not away_norm:
                 continue
 
-            home_score, away_score = extract_score(text)
+            home_score, away_score = extract_kooora_score(card, text)
 
-            # Score is required for FT, but NOT for HT. Some Kooora
-            # half-time cards expose the score outside the parsed text.
-            if phase == "FT" and (
-                home_score is None or away_score is None
-            ):
-                if status == "LIVE":
-                    skip_counts["NO_SCORE"] += 1
+            # FT must have a confirmed score. HT may legitimately lack a
+            # parsed score because the live score can be rendered separately.
+            if phase == "FT" and (home_score is None or away_score is None):
+                skip_counts["NO_SCORE"] += 1
                 continue
 
-            if phase == "HT" and (
-                home_score is None or away_score is None
-            ):
-                home_score = None
-                away_score = None
-
-            if phase not in {
-                "HT",
-                "FT",
-            }:
+            if phase not in {"HT", "FT"}:
                 if status == "LIVE":
                     skip_counts["NO_PHASE"] += 1
                     if skip_counts["NO_PHASE"] <= 5:
-                        debug_text = clean_text(status_text)
+                        attr = _kooora_attribute_text(card)
                         log(
-                            f"[KOOORA DEBUG] LIVE no HT phase | "
-                            f"text={debug_text[:220]}"
+                            f"[KOOORA DEBUG] LIVE no HT/FT phase | "
+                            f"attrs={attr[:180]} | text={text[:220]}"
                         )
                 continue
 
-            matches.append(
-                {
-                    "home": home,
-                    "away": away,
-                    "home_norm": home_norm,
-                    "away_norm": away_norm,
-                    "home_score": home_score,
-                    "away_score": away_score,
-                    "phase": phase,
-                }
-            )
+            matches.append({
+                "home": home,
+                "away": away,
+                "home_norm": home_norm,
+                "away_norm": away_norm,
+                "home_score": home_score,
+                "away_score": away_score,
+                "phase": phase,
+            })
 
         except Exception as exc:
-            log(
-                f"[KOOORA] card parse error: {exc}"
-            )
+            log(f"[KOOORA] card parse error: {exc}")
 
-    # Deduplicate.
     unique = {}
-
     for match in matches:
         key = (
-            match["home_norm"],
-            match["away_norm"],
-            match["phase"],
-            match["home_score"],
-            match["away_score"],
+            match["home_norm"], match["away_norm"], match["phase"],
+            match["home_score"], match["away_score"],
         )
-
         unique[key] = match
 
     result = list(unique.values())
@@ -965,11 +990,8 @@ def parse_kooora(html):
 
     for match in result[:60]:
         log(
-            f"[KOOORA] {match['phase']} "
-            f"{match['home']} "
-            f"{match['home_score']}-"
-            f"{match['away_score']} "
-            f"{match['away']}"
+            f"[KOOORA] {match['phase']} {match['home']} "
+            f"{match['home_score']}-{match['away_score']} {match['away']}"
         )
 
     return result
