@@ -808,6 +808,12 @@ def parse_kooora(html):
         "RESULT": 0,
     }
 
+    skip_counts = {
+        "NO_SCORE": 0,
+        "NO_TEAMS": 0,
+        "NO_PHASE": 0,
+    }
+
     for card in cards:
         try:
             status = clean_text(
@@ -835,6 +841,8 @@ def parse_kooora(html):
                 home_score is None
                 or away_score is None
             ):
+                if status == "LIVE":
+                    skip_counts["NO_SCORE"] += 1
                 continue
 
             candidates = extract_team_candidates(
@@ -842,6 +850,8 @@ def parse_kooora(html):
             )
 
             if len(candidates) < 2:
+                if status == "LIVE":
+                    skip_counts["NO_TEAMS"] += 1
                 continue
 
             # Use the first two credible team candidates.
@@ -879,19 +889,45 @@ def parse_kooora(html):
                     )
                 ).lower()
 
+                # Kooora currently uses Arabic "استراحة" for
+                # half-time on some live match cards. Older versions
+                # exposed HT/Half Time/Halbzeit instead.
                 if (
                     "ht" in status_text
                     or "half time" in status_text
+                    or "halftime" in status_text
                     or "halbzeit" in status_text
                     or "الشوط" in status_text
                     or "بين الشوطين" in status_text
+                    or "استراحة" in status_text
+                    or "نهاية الشوط الأول" in status_text
+                    or "نصف الوقت" in status_text
                 ):
                     phase = "HT"
+
+                # Some Kooora cards can expose the final state as text
+                # while data-match-status is still LIVE/other.
+                elif (
+                    "انتهت" in status_text
+                    or "انتهى" in status_text
+                    or "full time" in status_text
+                    or "finished" in status_text
+                    or "final" in status_text
+                ):
+                    phase = "FT"
 
             if phase not in {
                 "HT",
                 "FT",
             }:
+                if status == "LIVE":
+                    skip_counts["NO_PHASE"] += 1
+                    if skip_counts["NO_PHASE"] <= 5:
+                        debug_text = clean_text(status_text)
+                        log(
+                            f"[KOOORA DEBUG] LIVE no HT phase | "
+                            f"text={debug_text[:220]}"
+                        )
                 continue
 
             matches.append(
@@ -934,6 +970,14 @@ def parse_kooora(html):
         f"RESULT={counts['RESULT']} "
         f"HT/FT={len(result)}"
     )
+
+    if counts["LIVE"]:
+        log(
+            f"[KOOORA DEBUG] LIVE skips: "
+            f"no_score={skip_counts['NO_SCORE']} "
+            f"no_teams={skip_counts['NO_TEAMS']} "
+            f"no_phase={skip_counts['NO_PHASE']}"
+        )
 
     for match in result[:60]:
         log(
@@ -2885,9 +2929,12 @@ if __name__ == "__main__":
     )
 
     # --------------------------------------------------------
-    # TELEGRAM TEST MESSAGE
-    # Sends once on every process start.
+    # STARTUP TESTS
     # --------------------------------------------------------
+    log(
+        "--- [TEST MESSAGE] V3.3 Diagnostic: "
+        "نظام الفحص يعمل بشكل سليم ---"
+    )
     telegram_send_test_message()
 
     # One scanner thread only.
@@ -2908,3 +2955,4 @@ if __name__ == "__main__":
         debug=False,
         use_reloader=False,
     )
+
