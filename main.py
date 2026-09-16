@@ -85,7 +85,7 @@ def get_scanner_state():
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_4_RENDER"
+APP_VERSION = "KOOORA_BROWSER_V3_5_RENDER_CLEANUP_FIX"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -1942,19 +1942,25 @@ def browser_check_one(
     browser = None
     context = None
     page = None
+    playwright_cm = None
+    playwright_instance = None
     bookmaker_started = time.monotonic()
 
     log(f"[{bookmaker}] START | targets={len(matches)}")
 
     try:
-        with sync_playwright() as p:
+        # IMPORTANT: keep Playwright alive until browser/context/page cleanup
+        # has completed.  A function-level finally after a `with sync_playwright()`
+        # block runs too late because the Playwright event loop is already closed.
+        playwright_cm = sync_playwright()
+        playwright_instance = playwright_cm.start()
 
-            log(
-                f"[{bookmaker}] Launching Chromium | "
-                f"PLAYWRIGHT_BROWSERS_PATH={os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')}"
-            )
+        log(
+            f"[{bookmaker}] Launching Chromium | "
+            f"PLAYWRIGHT_BROWSERS_PATH={os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')}"
+        )
 
-            browser = p.chromium.launch(
+        browser = playwright_instance.chromium.launch(
                 headless=True,
                 args=[
                     "--no-sandbox",
@@ -1963,96 +1969,122 @@ def browser_check_one(
                 ],
             )
 
-            context = browser.new_context(
-                viewport={
-                    "width": 1440,
-                    "height": 1000,
-                },
-                locale="de-DE",
-                timezone_id="Europe/Berlin",
-                user_agent=(
-                    "Mozilla/5.0 "
-                    "(Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
+        context = browser.new_context(
+            viewport={
+                "width": 1440,
+                "height": 1000,
+            },
+            locale="de-DE",
+            timezone_id="Europe/Berlin",
+            user_agent=(
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+        )
+
+        page = context.new_page()
+
+        # ------------------------------------------------
+        # HOMEPAGE
+        # ------------------------------------------------
+
+        try:
+            response = page.goto(
+                homepage_url,
+                wait_until="domcontentloaded",
+                timeout=BROWSER_TIMEOUT_MS,
             )
 
-            page = context.new_page()
-
-            # ------------------------------------------------
-            # HOMEPAGE
-            # ------------------------------------------------
-
-            try:
-                response = page.goto(
-                    homepage_url,
-                    wait_until="domcontentloaded",
-                    timeout=BROWSER_TIMEOUT_MS,
-                )
-
-                page.wait_for_timeout(
-                    BROWSER_WAIT_MS
-                )
-
-            except PlaywrightTimeoutError:
-                log(
-                    f"[{bookmaker}] homepage timeout | elapsed={time.monotonic() - bookmaker_started:.1f}s"
-                )
-
-                return {
-                    "bookmaker": bookmaker,
-                    "status": "TIMEOUT",
-                    "final_url": page.url,
-                    "matches": [],
-                }
-
-            except Exception as exc:
-                log(
-                    f"[{bookmaker}] homepage error: {exc} | elapsed={time.monotonic() - bookmaker_started:.1f}s"
-                )
-
-                return {
-                    "bookmaker": bookmaker,
-                    "status": "ERROR",
-                    "final_url": page.url,
-                    "matches": [],
-                }
-
-            title = page.title()
-
-            body_text = safe_body_text(
-                page
+            page.wait_for_timeout(
+                BROWSER_WAIT_MS
             )
 
-            http_status = (
-                response.status
-                if response
-                else 0
+        except PlaywrightTimeoutError:
+            log(
+                f"[{bookmaker}] homepage timeout | elapsed={time.monotonic() - bookmaker_started:.1f}s"
             )
 
+            return {
+                "bookmaker": bookmaker,
+                "status": "TIMEOUT",
+                "final_url": page.url,
+                "matches": [],
+            }
+
+        except Exception as exc:
+            log(
+                f"[{bookmaker}] homepage error: {exc} | elapsed={time.monotonic() - bookmaker_started:.1f}s"
+            )
+
+            return {
+                "bookmaker": bookmaker,
+                "status": "ERROR",
+                "final_url": page.url,
+                "matches": [],
+            }
+
+        title = page.title()
+
+        body_text = safe_body_text(
+            page
+        )
+
+        http_status = (
+            response.status
+            if response
+            else 0
+        )
+
+        log(
+            f"[{bookmaker}] "
+            f"HTTP={http_status} "
+            f"final={page.url} "
+            f"text={len(body_text)}"
+        )
+
+        # ------------------------------------------------
+        # PROTECTION
+        # ------------------------------------------------
+
+        if protection_detected(
+            title,
+            body_text,
+            page.url,
+        ):
             log(
                 f"[{bookmaker}] "
-                f"HTTP={http_status} "
-                f"final={page.url} "
-                f"text={len(body_text)}"
+                f"CAPTCHA/Cloudflare -> SKIP"
             )
 
-            # ------------------------------------------------
-            # PROTECTION
-            # ------------------------------------------------
+            return {
+                "bookmaker": bookmaker,
+                "status": "CAPTCHA",
+                "final_url": page.url,
+                "matches": [],
+            }
 
-            if protection_detected(
-                title,
-                body_text,
-                page.url,
-            ):
-                log(
-                    f"[{bookmaker}] "
-                    f"CAPTCHA/Cloudflare -> SKIP"
-                )
+        # ------------------------------------------------
+        # EACH TARGET MATCH
+        # ------------------------------------------------
 
+        all_confirmed = []
+
+        for match in matches:
+
+            # --------------------------------------------
+            # A. Direct homepage rendered DOM check
+            # --------------------------------------------
+
+            verification = verify_page_for_match(
+                page,
+                match,
+                bookmaker,
+            )
+
+            if verification["status"] == "CAPTCHA":
                 return {
                     "bookmaker": bookmaker,
                     "status": "CAPTCHA",
@@ -2060,144 +2092,46 @@ def browser_check_one(
                     "matches": [],
                 }
 
-            # ------------------------------------------------
-            # EACH TARGET MATCH
-            # ------------------------------------------------
+            for found in verification.get(
+                "matches",
+                [],
+            ):
+                found["match"] = match
+                all_confirmed.append(
+                    found
+                )
 
-            all_confirmed = []
+            if verification.get(
+                "matches"
+            ):
+                continue
 
-            for match in matches:
+            # --------------------------------------------
+            # B. Homepage -> event/sport links
+            # --------------------------------------------
 
-                # --------------------------------------------
-                # A. Direct homepage rendered DOM check
-                # --------------------------------------------
-
-                verification = verify_page_for_match(
+            candidate_links = (
+                collect_candidate_links(
                     page,
+                    page.url,
                     match,
-                    bookmaker,
                 )
+            )
 
-                if verification["status"] == "CAPTCHA":
-                    return {
-                        "bookmaker": bookmaker,
-                        "status": "CAPTCHA",
-                        "final_url": page.url,
-                        "matches": [],
-                    }
+            checked_links = set()
 
-                for found in verification.get(
-                    "matches",
-                    [],
-                ):
-                    found["match"] = match
-                    all_confirmed.append(
-                        found
-                    )
+            for candidate_url in candidate_links[:25]:
 
-                if verification.get(
-                    "matches"
-                ):
+                if candidate_url in checked_links:
                     continue
 
-                # --------------------------------------------
-                # B. Homepage -> event/sport links
-                # --------------------------------------------
-
-                candidate_links = (
-                    collect_candidate_links(
-                        page,
-                        page.url,
-                        match,
-                    )
+                checked_links.add(
+                    candidate_url
                 )
-
-                checked_links = set()
-
-                for candidate_url in candidate_links[:25]:
-
-                    if candidate_url in checked_links:
-                        continue
-
-                    checked_links.add(
-                        candidate_url
-                    )
-
-                    try:
-                        page.goto(
-                            candidate_url,
-                            wait_until="domcontentloaded",
-                            timeout=BROWSER_TIMEOUT_MS,
-                        )
-
-                        page.wait_for_timeout(
-                            min(
-                                BROWSER_WAIT_MS,
-                                3000,
-                            )
-                        )
-
-                    except Exception:
-                        continue
-
-                    title = page.title()
-
-                    body_text = safe_body_text(
-                        page
-                    )
-
-                    if protection_detected(
-                        title,
-                        body_text,
-                        page.url,
-                    ):
-                        log(
-                            f"[{bookmaker}] "
-                            f"protected event page -> skip"
-                        )
-                        continue
-
-                    verification = verify_page_for_match(
-                        page,
-                        match,
-                        bookmaker,
-                    )
-
-                    for found in verification.get(
-                        "matches",
-                        [],
-                    ):
-                        found["match"] = match
-
-                        if not found.get(
-                            "href"
-                        ):
-                            found["href"] = (
-                                page.url
-                            )
-
-                        all_confirmed.append(
-                            found
-                        )
-
-                    if verification.get(
-                        "matches"
-                    ):
-                        break
-
-                # --------------------------------------------
-                # C. Internal search
-                # --------------------------------------------
-
-                if any(
-                    x.get("match") == match
-                    for x in all_confirmed
-                ):
-                    continue
 
                 try:
                     page.goto(
-                        homepage_url,
+                        candidate_url,
                         wait_until="domcontentloaded",
                         timeout=BROWSER_TIMEOUT_MS,
                     )
@@ -2205,126 +2139,198 @@ def browser_check_one(
                     page.wait_for_timeout(
                         min(
                             BROWSER_WAIT_MS,
-                            2500,
+                            3000,
                         )
                     )
 
                 except Exception:
                     continue
 
-                search_result = internal_search(
-                    page,
-                    bookmaker,
-                    match,
+                title = page.title()
+
+                body_text = safe_body_text(
+                    page
                 )
 
-                if search_result["status"] == "CAPTCHA":
+                if protection_detected(
+                    title,
+                    body_text,
+                    page.url,
+                ):
+                    log(
+                        f"[{bookmaker}] "
+                        f"protected event page -> skip"
+                    )
                     continue
 
-                for search_url in search_result.get(
-                    "links",
-                    []
-                )[:20]:
-
-                    try:
-                        page.goto(
-                            search_url,
-                            wait_until="domcontentloaded",
-                            timeout=BROWSER_TIMEOUT_MS,
-                        )
-
-                        page.wait_for_timeout(
-                            min(
-                                BROWSER_WAIT_MS,
-                                3000,
-                            )
-                        )
-
-                    except Exception:
-                        continue
-
-                    title = page.title()
-
-                    body_text = safe_body_text(
-                        page
-                    )
-
-                    if protection_detected(
-                        title,
-                        body_text,
-                        page.url,
-                    ):
-                        continue
-
-                    verification = verify_page_for_match(
-                        page,
-                        match,
-                        bookmaker,
-                    )
-
-                    for found in verification.get(
-                        "matches",
-                        [],
-                    ):
-                        found["match"] = match
-
-                        if not found.get(
-                            "href"
-                        ):
-                            found["href"] = (
-                                page.url
-                            )
-
-                        all_confirmed.append(
-                            found
-                        )
-
-                    if verification.get(
-                        "matches"
-                    ):
-                        break
-
-            # ------------------------------------------------
-            # DEDUP CONFIRMED RESULTS
-            # ------------------------------------------------
-
-            unique = {}
-
-            for found in all_confirmed:
-                match = found["match"]
-
-                key = (
-                    match["home_norm"],
-                    match["away_norm"],
-                    match["phase"],
-                    found.get(
-                        "href",
-                        "",
-                    ),
+                verification = verify_page_for_match(
+                    page,
+                    match,
+                    bookmaker,
                 )
 
-                unique[key] = found
+                for found in verification.get(
+                    "matches",
+                    [],
+                ):
+                    found["match"] = match
 
-            confirmed = list(
-                unique.values()
+                    if not found.get(
+                        "href"
+                    ):
+                        found["href"] = (
+                            page.url
+                        )
+
+                    all_confirmed.append(
+                        found
+                    )
+
+                if verification.get(
+                    "matches"
+                ):
+                    break
+
+            # --------------------------------------------
+            # C. Internal search
+            # --------------------------------------------
+
+            if any(
+                x.get("match") == match
+                for x in all_confirmed
+            ):
+                continue
+
+            try:
+                page.goto(
+                    homepage_url,
+                    wait_until="domcontentloaded",
+                    timeout=BROWSER_TIMEOUT_MS,
+                )
+
+                page.wait_for_timeout(
+                    min(
+                        BROWSER_WAIT_MS,
+                        2500,
+                    )
+                )
+
+            except Exception:
+                continue
+
+            search_result = internal_search(
+                page,
+                bookmaker,
+                match,
             )
 
-            if confirmed:
-                status = "CONFIRMED"
-            else:
-                status = "NOT_CONFIRMED"
+            if search_result["status"] == "CAPTCHA":
+                continue
 
-            log(
-                f"[{bookmaker}] status={status} confirmed={len(confirmed)} "
-                f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
+            for search_url in search_result.get(
+                "links",
+                []
+            )[:20]:
+
+                try:
+                    page.goto(
+                        search_url,
+                        wait_until="domcontentloaded",
+                        timeout=BROWSER_TIMEOUT_MS,
+                    )
+
+                    page.wait_for_timeout(
+                        min(
+                            BROWSER_WAIT_MS,
+                            3000,
+                        )
+                    )
+
+                except Exception:
+                    continue
+
+                title = page.title()
+
+                body_text = safe_body_text(
+                    page
+                )
+
+                if protection_detected(
+                    title,
+                    body_text,
+                    page.url,
+                ):
+                    continue
+
+                verification = verify_page_for_match(
+                    page,
+                    match,
+                    bookmaker,
+                )
+
+                for found in verification.get(
+                    "matches",
+                    [],
+                ):
+                    found["match"] = match
+
+                    if not found.get(
+                        "href"
+                    ):
+                        found["href"] = (
+                            page.url
+                        )
+
+                    all_confirmed.append(
+                        found
+                    )
+
+                if verification.get(
+                    "matches"
+                ):
+                    break
+
+        # ------------------------------------------------
+        # DEDUP CONFIRMED RESULTS
+        # ------------------------------------------------
+
+        unique = {}
+
+        for found in all_confirmed:
+            match = found["match"]
+
+            key = (
+                match["home_norm"],
+                match["away_norm"],
+                match["phase"],
+                found.get(
+                    "href",
+                    "",
+                ),
             )
 
-            return {
-                "bookmaker": bookmaker,
-                "status": status,
-                "final_url": page.url,
-                "matches": confirmed,
-            }
+            unique[key] = found
+
+        confirmed = list(
+            unique.values()
+        )
+
+        if confirmed:
+            status = "CONFIRMED"
+        else:
+            status = "NOT_CONFIRMED"
+
+        log(
+            f"[{bookmaker}] status={status} confirmed={len(confirmed)} "
+            f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
+        )
+
+        return {
+            "bookmaker": bookmaker,
+            "status": status,
+            "final_url": page.url,
+            "matches": confirmed,
+        }
 
     except Exception as exc:
         log(
@@ -2343,6 +2349,8 @@ def browser_check_one(
     finally:
         cleanup_started = time.monotonic()
 
+        # Cleanup must happen BEFORE playwright_instance.stop().
+        # This fixes: "Event loop is closed! Is Playwright already stopped?"
         try:
             if page:
                 page.close(run_before_unload=False)
@@ -2360,6 +2368,12 @@ def browser_check_one(
                 browser.close()
         except Exception as exc:
             log(f"[{bookmaker}] browser close warning: {exc}")
+
+        try:
+            if playwright_cm:
+                playwright_cm.stop()
+        except Exception as exc:
+            log(f"[{bookmaker}] Playwright stop warning: {exc}")
 
         log(
             f"[{bookmaker}] CLEANUP complete | "
