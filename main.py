@@ -833,21 +833,40 @@ def parse_kooora(html):
                 )
             )
 
-            home_score, away_score = extract_score(
-                text
-            )
+            # Determine the phase BEFORE requiring a score.
+            # Kooora may expose a LIVE/HT card whose score is rendered
+            # in a separate JS element and is therefore not present in
+            # the parsed card text. HT detection must not depend on it.
+            phase = ""
+            status_text = text.lower()
 
-            if (
-                home_score is None
-                or away_score is None
-            ):
-                if status == "LIVE":
-                    skip_counts["NO_SCORE"] += 1
-                continue
+            if status == "RESULT":
+                phase = "FT"
+            elif status == "LIVE":
+                if (
+                    "ht" in status_text
+                    or "half time" in status_text
+                    or "halftime" in status_text
+                    or "half-time" in status_text
+                    or "halbzeit" in status_text
+                    or "pause" in status_text
+                    or "الشوط" in status_text
+                    or "بين الشوطين" in status_text
+                    or "استراحة" in status_text
+                    or "نهاية الشوط الأول" in status_text
+                    or "نصف الوقت" in status_text
+                ):
+                    phase = "HT"
+                elif (
+                    "انتهت" in status_text
+                    or "انتهى" in status_text
+                    or "full time" in status_text
+                    or "finished" in status_text
+                    or "final" in status_text
+                ):
+                    phase = "FT"
 
-            candidates = extract_team_candidates(
-                card
-            )
+            candidates = extract_team_candidates(card)
 
             if len(candidates) < 2:
                 if status == "LIVE":
@@ -864,57 +883,22 @@ def parse_kooora(html):
             if not home_norm or not away_norm:
                 continue
 
-            phase = ""
+            home_score, away_score = extract_score(text)
 
-            if status == "RESULT":
-                phase = "FT"
+            # Score is required for FT, but NOT for HT. Some Kooora
+            # half-time cards expose the score outside the parsed text.
+            if phase == "FT" and (
+                home_score is None or away_score is None
+            ):
+                if status == "LIVE":
+                    skip_counts["NO_SCORE"] += 1
+                continue
 
-            elif status == "LIVE":
-                status_text = clean_text(
-                    " ".join(
-                        [
-                            text,
-                            " ".join(
-                                clean_text(
-                                    x.get_text(
-                                        " ",
-                                        strip=True,
-                                    )
-                                )
-                                for x in card.select(
-                                    ".fco-match-status"
-                                )
-                            ),
-                        ]
-                    )
-                ).lower()
-
-                # Kooora currently uses Arabic "استراحة" for
-                # half-time on some live match cards. Older versions
-                # exposed HT/Half Time/Halbzeit instead.
-                if (
-                    "ht" in status_text
-                    or "half time" in status_text
-                    or "halftime" in status_text
-                    or "halbzeit" in status_text
-                    or "الشوط" in status_text
-                    or "بين الشوطين" in status_text
-                    or "استراحة" in status_text
-                    or "نهاية الشوط الأول" in status_text
-                    or "نصف الوقت" in status_text
-                ):
-                    phase = "HT"
-
-                # Some Kooora cards can expose the final state as text
-                # while data-match-status is still LIVE/other.
-                elif (
-                    "انتهت" in status_text
-                    or "انتهى" in status_text
-                    or "full time" in status_text
-                    or "finished" in status_text
-                    or "final" in status_text
-                ):
-                    phase = "FT"
+            if phase == "HT" and (
+                home_score is None or away_score is None
+            ):
+                home_score = None
+                away_score = None
 
             if phase not in {
                 "HT",
@@ -2955,4 +2939,3 @@ if __name__ == "__main__":
         debug=False,
         use_reloader=False,
     )
-
