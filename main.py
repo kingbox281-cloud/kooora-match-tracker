@@ -85,7 +85,7 @@ def get_scanner_state():
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_5_RENDER_CLEANUP_FIX"
+APP_VERSION = "KOOORA_BROWSER_V3_6_RENDER_PLAYWRIGHT_FIX"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -2370,10 +2370,14 @@ def browser_check_one(
             log(f"[{bookmaker}] browser close warning: {exc}")
 
         try:
-            if playwright_cm:
-                playwright_cm.stop()
+            if playwright_cm and playwright_instance:
+                # PlaywrightContextManager in the installed Playwright version
+                # does not reliably expose .stop(). Use its context-manager exit
+                # directly so the sync API event loop is always shut down before
+                # this worker thread is reused for another bookmaker.
+                playwright_cm.__exit__(None, None, None)
         except Exception as exc:
-            log(f"[{bookmaker}] Playwright stop warning: {exc}")
+            log(f"[{bookmaker}] Playwright shutdown warning: {exc}")
 
         log(
             f"[{bookmaker}] CLEANUP complete | "
