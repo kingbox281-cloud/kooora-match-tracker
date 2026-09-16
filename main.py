@@ -19,8 +19,8 @@ from bs4 import BeautifulSoup
 from flask import Flask
 
 try:
-    from playwright.sync_api import (
-        sync_playwright,
+    from playwright.async_api import (
+        async_playwright,
         TimeoutError as PlaywrightTimeoutError,
     )
     PLAYWRIGHT_AVAILABLE = True
@@ -85,7 +85,7 @@ def get_scanner_state():
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_6_RENDER_PLAYWRIGHT_FIX"
+APP_VERSION = "KOOORA_BROWSER_V3_7_RENDER_ASYNC_PLAYWRIGHT"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -1038,10 +1038,10 @@ def protection_detected(title, text, url):
     )
 
 
-def safe_body_text(page):
+async def safe_body_text(page):
     try:
         return clean_text(
-            page.locator(
+            await page.locator(
                 "body"
             ).inner_text(
                 timeout=5000
@@ -1073,7 +1073,7 @@ def likely_event_selector(selector):
     )
 
 
-def get_event_blocks(page):
+async def get_event_blocks(page):
     """
     Extract likely local event blocks from the DOM.
 
@@ -1126,15 +1126,11 @@ def get_event_blocks(page):
                         .trim();
 
                     if (!text) continue;
-
                     if (text.length < 20) continue;
                     if (text.length > 2500) continue;
 
                     const rect = node.getBoundingClientRect();
-
-                    if (rect.width === 0 || rect.height === 0) {
-                        continue;
-                    }
+                    if (rect.width === 0 || rect.height === 0) continue;
 
                     const links = Array.from(
                         node.querySelectorAll("a[href]")
@@ -1147,11 +1143,8 @@ def get_event_blocks(page):
                     }))
                     .filter(x => x.href);
 
-                    const key = text + "|" +
-                        (links[0]?.href || "");
-
+                    const key = text + "|" + (links[0]?.href || "");
                     if (seen.has(key)) continue;
-
                     seen.add(key);
 
                     output.push({
@@ -1160,10 +1153,7 @@ def get_event_blocks(page):
                         selector: selector
                     });
 
-                    if (output.length >= 500) {
-                        return output;
-                    }
-
+                    if (output.length >= 500) return output;
                 } catch (_) {
                     continue;
                 }
@@ -1175,18 +1165,12 @@ def get_event_blocks(page):
     """
 
     try:
-        blocks = page.evaluate(script)
-
+        blocks = await page.evaluate(script)
         if not isinstance(blocks, list):
             return []
-
         return blocks[:MAX_EVENT_BLOCKS]
-
     except Exception as exc:
-        log(
-            f"[BROWSER] event block extraction error: {exc}"
-        )
-
+        log(f"[BROWSER] event block extraction error: {exc}")
         return []
 
 
@@ -1437,9 +1421,9 @@ def same_domain(base_url, target_url):
         return False
 
 
-def collect_links(page):
+async def collect_links(page):
     try:
-        links = page.locator(
+        links = await page.locator(
             "a[href]"
         ).evaluate_all(
             """
@@ -1526,12 +1510,12 @@ def link_contains_team(link, match):
     )
 
 
-def collect_candidate_links(
+async def collect_candidate_links(
     page,
     base_url,
     match,
 ):
-    links = collect_links(page)
+    links = await collect_links(page)
 
     candidates = []
 
@@ -1589,7 +1573,7 @@ def collect_candidate_links(
 # INTERNAL SEARCH
 # ============================================================
 
-def find_search_inputs(page):
+async def find_search_inputs(page):
     selectors = [
         "input[type='search']",
         "input[placeholder*='Search']",
@@ -1607,18 +1591,11 @@ def find_search_inputs(page):
 
     for selector in selectors:
         try:
-            locator = page.locator(
-                selector
-            )
+            locator = page.locator(selector)
+            count = await locator.count()
 
-            count = locator.count()
-
-            for index in range(
-                min(count, 5)
-            ):
-                result.append(
-                    locator.nth(index)
-                )
+            for index in range(min(count, 5)):
+                result.append(locator.nth(index))
 
         except Exception:
             continue
@@ -1626,7 +1603,7 @@ def find_search_inputs(page):
     return result
 
 
-def internal_search(
+async def internal_search(
     page,
     bookmaker,
     match,
@@ -1657,13 +1634,13 @@ def internal_search(
 
     for first, second in searches:
         try:
-            page.goto(
+            await page.goto(
                 page.url,
                 wait_until="domcontentloaded",
                 timeout=BROWSER_TIMEOUT_MS,
             )
 
-            page.wait_for_timeout(
+            await page.wait_for_timeout(
                 min(
                     1500,
                     BROWSER_WAIT_MS,
@@ -1682,25 +1659,25 @@ def internal_search(
 
         for search_input in inputs[:3]:
             try:
-                search_input.fill(
+                await search_input.fill(
                     ""
                 )
 
-                search_input.fill(
+                await search_input.fill(
                     first
                 )
 
-                search_input.press(
+                await search_input.press(
                     "Enter"
                 )
 
-                page.wait_for_timeout(
+                await page.wait_for_timeout(
                     2500
                 )
 
-                title = page.title()
+                title = await page.title()
 
-                text = safe_body_text(
+                text = await safe_body_text(
                     page
                 )
 
@@ -1720,7 +1697,7 @@ def internal_search(
                         "links": [],
                     }
 
-                links = collect_candidate_links(
+                links = await collect_candidate_links(
                     page,
                     page.url,
                     match,
@@ -1845,7 +1822,7 @@ def verify_event_window(
     }
 
 
-def verify_page_for_match(
+async def verify_page_for_match(
     page,
     match,
     bookmaker,
@@ -1856,9 +1833,9 @@ def verify_page_for_match(
     NEVER classify the whole page as PREMATCH.
     """
 
-    title = page.title()
+    title = await page.title()
 
-    body_text = safe_body_text(
+    body_text = await safe_body_text(
         page
     )
 
@@ -1872,7 +1849,7 @@ def verify_page_for_match(
             "matches": [],
         }
 
-    event_blocks = get_event_blocks(
+    event_blocks = await get_event_blocks(
         page
     )
 
@@ -1915,21 +1892,12 @@ def verify_page_for_match(
 # ONE BOOKMAKER
 # ============================================================
 
-def browser_check_one(
+async def browser_check_one_async(
     bookmaker,
     homepage_url,
     matches,
 ):
-    """
-    One Chromium instance per bookmaker.
-
-    Flow:
-        Homepage
-        -> visible event/sport links
-        -> internal search
-        -> candidate event
-        -> strict local event verification
-    """
+    """One Chromium instance per bookmaker using Playwright Async API."""
 
     if not PLAYWRIGHT_AVAILABLE:
         return {
@@ -1943,82 +1911,65 @@ def browser_check_one(
     context = None
     page = None
     playwright_cm = None
-    playwright_instance = None
     bookmaker_started = time.monotonic()
 
     log(f"[{bookmaker}] START | targets={len(matches)}")
 
     try:
-        # IMPORTANT: keep Playwright alive until browser/context/page cleanup
-        # has completed.  A function-level finally after a `with sync_playwright()`
-        # block runs too late because the Playwright event loop is already closed.
-        playwright_cm = sync_playwright()
-        playwright_instance = playwright_cm.start()
+        playwright_cm = async_playwright()
+        playwright = await playwright_cm.start()
 
         log(
             f"[{bookmaker}] Launching Chromium | "
             f"PLAYWRIGHT_BROWSERS_PATH={os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')}"
         )
 
-        browser = playwright_instance.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ],
-            )
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        )
 
-        context = browser.new_context(
-            viewport={
-                "width": 1440,
-                "height": 1000,
-            },
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 1000},
             locale="de-DE",
             timezone_id="Europe/Berlin",
             user_agent=(
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/131.0.0.0 Safari/537.36"
             ),
         )
 
-        page = context.new_page()
-
-        # ------------------------------------------------
-        # HOMEPAGE
-        # ------------------------------------------------
+        page = await context.new_page()
 
         try:
-            response = page.goto(
+            response = await page.goto(
                 homepage_url,
                 wait_until="domcontentloaded",
                 timeout=BROWSER_TIMEOUT_MS,
             )
-
-            page.wait_for_timeout(
-                BROWSER_WAIT_MS
-            )
+            await page.wait_for_timeout(BROWSER_WAIT_MS)
 
         except PlaywrightTimeoutError:
             log(
-                f"[{bookmaker}] homepage timeout | elapsed={time.monotonic() - bookmaker_started:.1f}s"
+                f"[{bookmaker}] homepage timeout | "
+                f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
             )
-
             return {
                 "bookmaker": bookmaker,
                 "status": "TIMEOUT",
                 "final_url": page.url,
                 "matches": [],
             }
-
         except Exception as exc:
             log(
-                f"[{bookmaker}] homepage error: {exc} | elapsed={time.monotonic() - bookmaker_started:.1f}s"
+                f"[{bookmaker}] homepage error: {exc} | "
+                f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
             )
-
             return {
                 "bookmaker": bookmaker,
                 "status": "ERROR",
@@ -2026,39 +1977,17 @@ def browser_check_one(
                 "matches": [],
             }
 
-        title = page.title()
-
-        body_text = safe_body_text(
-            page
-        )
-
-        http_status = (
-            response.status
-            if response
-            else 0
-        )
+        title = await page.title()
+        body_text = await safe_body_text(page)
+        http_status = response.status if response else 0
 
         log(
-            f"[{bookmaker}] "
-            f"HTTP={http_status} "
-            f"final={page.url} "
-            f"text={len(body_text)}"
+            f"[{bookmaker}] HTTP={http_status} "
+            f"final={page.url} text={len(body_text)}"
         )
 
-        # ------------------------------------------------
-        # PROTECTION
-        # ------------------------------------------------
-
-        if protection_detected(
-            title,
-            body_text,
-            page.url,
-        ):
-            log(
-                f"[{bookmaker}] "
-                f"CAPTCHA/Cloudflare -> SKIP"
-            )
-
+        if protection_detected(title, body_text, page.url):
+            log(f"[{bookmaker}] CAPTCHA/Cloudflare -> SKIP")
             return {
                 "bookmaker": bookmaker,
                 "status": "CAPTCHA",
@@ -2066,22 +1995,11 @@ def browser_check_one(
                 "matches": [],
             }
 
-        # ------------------------------------------------
-        # EACH TARGET MATCH
-        # ------------------------------------------------
-
         all_confirmed = []
 
         for match in matches:
-
-            # --------------------------------------------
-            # A. Direct homepage rendered DOM check
-            # --------------------------------------------
-
-            verification = verify_page_for_match(
-                page,
-                match,
-                bookmaker,
+            verification = await verify_page_for_match(
+                page, match, bookmaker
             )
 
             if verification["status"] == "CAPTCHA":
@@ -2092,233 +2010,123 @@ def browser_check_one(
                     "matches": [],
                 }
 
-            for found in verification.get(
-                "matches",
-                [],
-            ):
+            for found in verification.get("matches", []):
                 found["match"] = match
-                all_confirmed.append(
-                    found
-                )
+                all_confirmed.append(found)
 
-            if verification.get(
-                "matches"
-            ):
+            if verification.get("matches"):
                 continue
 
-            # --------------------------------------------
-            # B. Homepage -> event/sport links
-            # --------------------------------------------
-
-            candidate_links = (
-                collect_candidate_links(
-                    page,
-                    page.url,
-                    match,
-                )
+            candidate_links = await collect_candidate_links(
+                page, page.url, match
             )
 
             checked_links = set()
 
             for candidate_url in candidate_links[:25]:
-
                 if candidate_url in checked_links:
                     continue
-
-                checked_links.add(
-                    candidate_url
-                )
+                checked_links.add(candidate_url)
 
                 try:
-                    page.goto(
+                    await page.goto(
                         candidate_url,
                         wait_until="domcontentloaded",
                         timeout=BROWSER_TIMEOUT_MS,
                     )
-
-                    page.wait_for_timeout(
-                        min(
-                            BROWSER_WAIT_MS,
-                            3000,
-                        )
+                    await page.wait_for_timeout(
+                        min(BROWSER_WAIT_MS, 3000)
                     )
-
                 except Exception:
                     continue
 
-                title = page.title()
+                title = await page.title()
+                body_text = await safe_body_text(page)
 
-                body_text = safe_body_text(
-                    page
-                )
-
-                if protection_detected(
-                    title,
-                    body_text,
-                    page.url,
-                ):
-                    log(
-                        f"[{bookmaker}] "
-                        f"protected event page -> skip"
-                    )
+                if protection_detected(title, body_text, page.url):
+                    log(f"[{bookmaker}] protected event page -> skip")
                     continue
 
-                verification = verify_page_for_match(
-                    page,
-                    match,
-                    bookmaker,
+                verification = await verify_page_for_match(
+                    page, match, bookmaker
                 )
 
-                for found in verification.get(
-                    "matches",
-                    [],
-                ):
+                for found in verification.get("matches", []):
                     found["match"] = match
+                    if not found.get("href"):
+                        found["href"] = page.url
+                    all_confirmed.append(found)
 
-                    if not found.get(
-                        "href"
-                    ):
-                        found["href"] = (
-                            page.url
-                        )
-
-                    all_confirmed.append(
-                        found
-                    )
-
-                if verification.get(
-                    "matches"
-                ):
+                if verification.get("matches"):
                     break
 
-            # --------------------------------------------
-            # C. Internal search
-            # --------------------------------------------
-
-            if any(
-                x.get("match") == match
-                for x in all_confirmed
-            ):
+            if any(x.get("match") == match for x in all_confirmed):
                 continue
 
             try:
-                page.goto(
+                await page.goto(
                     homepage_url,
                     wait_until="domcontentloaded",
                     timeout=BROWSER_TIMEOUT_MS,
                 )
-
-                page.wait_for_timeout(
-                    min(
-                        BROWSER_WAIT_MS,
-                        2500,
-                    )
+                await page.wait_for_timeout(
+                    min(BROWSER_WAIT_MS, 2500)
                 )
-
             except Exception:
                 continue
 
-            search_result = internal_search(
-                page,
-                bookmaker,
-                match,
+            search_result = await internal_search(
+                page, bookmaker, match
             )
 
             if search_result["status"] == "CAPTCHA":
                 continue
 
-            for search_url in search_result.get(
-                "links",
-                []
-            )[:20]:
-
+            for search_url in search_result.get("links", [])[:20]:
                 try:
-                    page.goto(
+                    await page.goto(
                         search_url,
                         wait_until="domcontentloaded",
                         timeout=BROWSER_TIMEOUT_MS,
                     )
-
-                    page.wait_for_timeout(
-                        min(
-                            BROWSER_WAIT_MS,
-                            3000,
-                        )
+                    await page.wait_for_timeout(
+                        min(BROWSER_WAIT_MS, 3000)
                     )
-
                 except Exception:
                     continue
 
-                title = page.title()
+                title = await page.title()
+                body_text = await safe_body_text(page)
 
-                body_text = safe_body_text(
-                    page
-                )
-
-                if protection_detected(
-                    title,
-                    body_text,
-                    page.url,
-                ):
+                if protection_detected(title, body_text, page.url):
                     continue
 
-                verification = verify_page_for_match(
-                    page,
-                    match,
-                    bookmaker,
+                verification = await verify_page_for_match(
+                    page, match, bookmaker
                 )
 
-                for found in verification.get(
-                    "matches",
-                    [],
-                ):
+                for found in verification.get("matches", []):
                     found["match"] = match
+                    if not found.get("href"):
+                        found["href"] = page.url
+                    all_confirmed.append(found)
 
-                    if not found.get(
-                        "href"
-                    ):
-                        found["href"] = (
-                            page.url
-                        )
-
-                    all_confirmed.append(
-                        found
-                    )
-
-                if verification.get(
-                    "matches"
-                ):
+                if verification.get("matches"):
                     break
 
-        # ------------------------------------------------
-        # DEDUP CONFIRMED RESULTS
-        # ------------------------------------------------
-
         unique = {}
-
         for found in all_confirmed:
             match = found["match"]
-
             key = (
                 match["home_norm"],
                 match["away_norm"],
                 match["phase"],
-                found.get(
-                    "href",
-                    "",
-                ),
+                found.get("href", ""),
             )
-
             unique[key] = found
 
-        confirmed = list(
-            unique.values()
-        )
-
-        if confirmed:
-            status = "CONFIRMED"
-        else:
-            status = "NOT_CONFIRMED"
+        confirmed = list(unique.values())
+        status = "CONFIRMED" if confirmed else "NOT_CONFIRMED"
 
         log(
             f"[{bookmaker}] status={status} confirmed={len(confirmed)} "
@@ -2338,7 +2146,6 @@ def browser_check_one(
             f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
         )
         log(traceback.format_exc())
-
         return {
             "bookmaker": bookmaker,
             "status": "ERROR",
@@ -2349,33 +2156,27 @@ def browser_check_one(
     finally:
         cleanup_started = time.monotonic()
 
-        # Cleanup must happen BEFORE playwright_instance.stop().
-        # This fixes: "Event loop is closed! Is Playwright already stopped?"
         try:
             if page:
-                page.close(run_before_unload=False)
+                await page.close(run_before_unload=False)
         except Exception as exc:
             log(f"[{bookmaker}] page close warning: {exc}")
 
         try:
             if context:
-                context.close()
+                await context.close()
         except Exception as exc:
             log(f"[{bookmaker}] context close warning: {exc}")
 
         try:
             if browser:
-                browser.close()
+                await browser.close()
         except Exception as exc:
             log(f"[{bookmaker}] browser close warning: {exc}")
 
         try:
-            if playwright_cm and playwright_instance:
-                # PlaywrightContextManager in the installed Playwright version
-                # does not reliably expose .stop(). Use its context-manager exit
-                # directly so the sync API event loop is always shut down before
-                # this worker thread is reused for another bookmaker.
-                playwright_cm.__exit__(None, None, None)
+            if playwright_cm:
+                await playwright_cm.stop()
         except Exception as exc:
             log(f"[{bookmaker}] Playwright shutdown warning: {exc}")
 
@@ -2385,6 +2186,54 @@ def browser_check_one(
             f"total={time.monotonic() - bookmaker_started:.1f}s"
         )
 
+
+def browser_check_one(bookmaker, homepage_url, matches):
+    """Sync wrapper that always runs the Async Playwright worker safely."""
+    import asyncio
+    import threading as _threading
+
+    try:
+        asyncio.get_running_loop()
+        running = True
+    except RuntimeError:
+        running = False
+
+    if not running:
+        return asyncio.run(
+            browser_check_one_async(bookmaker, homepage_url, matches)
+        )
+
+    result_holder = {}
+    error_holder = {}
+
+    def runner():
+        try:
+            result_holder["result"] = asyncio.run(
+                browser_check_one_async(bookmaker, homepage_url, matches)
+            )
+        except Exception as exc:
+            error_holder["error"] = exc
+
+    worker = _threading.Thread(
+        target=runner,
+        daemon=True,
+        name=f"playwright-{bookmaker}",
+    )
+    worker.start()
+    worker.join()
+
+    if "error" in error_holder:
+        raise error_holder["error"]
+
+    return result_holder.get(
+        "result",
+        {
+            "bookmaker": bookmaker,
+            "status": "ERROR",
+            "final_url": homepage_url,
+            "matches": [],
+        },
+    )
 
 # ============================================================
 # BOOKMAKER SCAN
@@ -2865,6 +2714,7 @@ def scanner_loop():
         f"[START] Playwright="
         f"{'AVAILABLE' if PLAYWRIGHT_AVAILABLE else 'NOT INSTALLED'}"
     )
+    log("[START] Playwright API=ASYNC (safe for asyncio and Render)")
     log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms")
     log("[START] Health endpoint: /health")
 
