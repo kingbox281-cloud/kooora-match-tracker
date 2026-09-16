@@ -4,6 +4,8 @@ import time
 import threading
 import unicodedata
 from datetime import datetime
+
+import traceback
 from urllib.parse import urljoin, urlparse, quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -41,6 +43,37 @@ except Exception:
 #     NEVER bypassed.
 #     Protected bookmaker is skipped.
 # ============================================================
+
+
+def log(message):
+    """Immediate Render-friendly logging."""
+    print(message, flush=True)
+
+
+# Live scanner diagnostics. Never contains Telegram secrets.
+scanner_state_lock = threading.Lock()
+scanner_state = {
+    "active": False,
+    "phase": "IDLE",
+    "scan_started_at": None,
+    "last_scan_started_at": None,
+    "last_scan_finished_at": None,
+    "last_successful_scan_at": None,
+    "last_scan_duration_seconds": None,
+    "last_error": None,
+    "last_kooora_matches": 0,
+    "last_bookmaker_results": 0,
+}
+
+
+def update_scanner_state(**updates):
+    with scanner_state_lock:
+        scanner_state.update(updates)
+
+
+def get_scanner_state():
+    with scanner_state_lock:
+        return dict(scanner_state)
 
 
 # ============================================================
@@ -270,6 +303,7 @@ def home():
 
 @app.route("/health")
 def health():
+    state = get_scanner_state()
     return {
         "status": "ok",
         "version": APP_VERSION,
@@ -277,6 +311,7 @@ def health():
         "scan_seconds": SCAN_SECONDS,
         "workers": MAX_BROWSER_WORKERS,
         "min_match_confidence": MIN_MATCH_CONFIDENCE,
+        "scanner": state,
     }
 
 
@@ -633,7 +668,7 @@ def fetch_kooora_html():
                 timeout=HTTP_TIMEOUT,
             )
 
-            print(
+            log(
                 f"[KOOORA] HTTP={response.status_code} "
                 f"url={response.url} "
                 f"length={len(response.text)}"
@@ -643,7 +678,7 @@ def fetch_kooora_html():
                 return response.text
 
         except Exception as exc:
-            print(
+            log(
                 f"[KOOORA] ERROR {url}: {exc}"
             )
 
@@ -734,6 +769,7 @@ def extract_team_candidates(card):
                     for x in candidates
                 ]:
                     candidates.append(value)
+
         except Exception:
             continue
 
@@ -759,7 +795,7 @@ def parse_kooora(html):
         )
 
     if not cards:
-        print(
+        log(
             "[KOOORA] No match cards found"
         )
         return []
@@ -871,7 +907,7 @@ def parse_kooora(html):
             )
 
         except Exception as exc:
-            print(
+            log(
                 f"[KOOORA] card parse error: {exc}"
             )
 
@@ -891,7 +927,7 @@ def parse_kooora(html):
 
     result = list(unique.values())
 
-    print(
+    log(
         f"[KOOORA] cards={len(cards)} "
         f"FIXTURE={counts['FIXTURE']} "
         f"LIVE={counts['LIVE']} "
@@ -900,7 +936,7 @@ def parse_kooora(html):
     )
 
     for match in result[:60]:
-        print(
+        log(
             f"[KOOORA] {match['phase']} "
             f"{match['home']} "
             f"{match['home_score']}-"
@@ -1067,7 +1103,7 @@ def get_event_blocks(page):
         return blocks[:MAX_EVENT_BLOCKS]
 
     except Exception as exc:
-        print(
+        log(
             f"[BROWSER] event block extraction error: {exc}"
         )
 
@@ -1520,7 +1556,6 @@ def internal_search(
     page,
     bookmaker,
     match,
-    homepage_url,
 ):
     """
     Try normal visible-site search controls.
@@ -1549,7 +1584,7 @@ def internal_search(
     for first, second in searches:
         try:
             page.goto(
-                homepage_url,
+                page.url,
                 wait_until="domcontentloaded",
                 timeout=BROWSER_TIMEOUT_MS,
             )
@@ -1600,7 +1635,7 @@ def internal_search(
                     text,
                     page.url,
                 ):
-                    print(
+                    log(
                         f"[{bookmaker}] "
                         f"CAPTCHA/protection "
                         f"during internal search"
@@ -1832,6 +1867,10 @@ def browser_check_one(
 
     browser = None
     context = None
+    page = None
+    bookmaker_started = time.monotonic()
+
+    log(f"[{bookmaker}] START | targets={len(matches)}")
 
     try:
         with sync_playwright() as p:
@@ -1879,9 +1918,8 @@ def browser_check_one(
                 )
 
             except PlaywrightTimeoutError:
-                print(
-                    f"[{bookmaker}] "
-                    f"homepage timeout"
+                log(
+                    f"[{bookmaker}] homepage timeout | elapsed={time.monotonic() - bookmaker_started:.1f}s"
                 )
 
                 return {
@@ -1892,9 +1930,8 @@ def browser_check_one(
                 }
 
             except Exception as exc:
-                print(
-                    f"[{bookmaker}] "
-                    f"homepage error: {exc}"
+                log(
+                    f"[{bookmaker}] homepage error: {exc} | elapsed={time.monotonic() - bookmaker_started:.1f}s"
                 )
 
                 return {
@@ -1916,7 +1953,7 @@ def browser_check_one(
                 else 0
             )
 
-            print(
+            log(
                 f"[{bookmaker}] "
                 f"HTTP={http_status} "
                 f"final={page.url} "
@@ -1932,7 +1969,7 @@ def browser_check_one(
                 body_text,
                 page.url,
             ):
-                print(
+                log(
                     f"[{bookmaker}] "
                     f"CAPTCHA/Cloudflare -> SKIP"
                 )
@@ -2035,7 +2072,7 @@ def browser_check_one(
                         body_text,
                         page.url,
                     ):
-                        print(
+                        log(
                             f"[{bookmaker}] "
                             f"protected event page -> skip"
                         )
@@ -2100,7 +2137,6 @@ def browser_check_one(
                     page,
                     bookmaker,
                     match,
-                    homepage_url,
                 )
 
                 if search_result["status"] == "CAPTCHA":
@@ -2199,10 +2235,9 @@ def browser_check_one(
             else:
                 status = "NOT_CONFIRMED"
 
-            print(
-                f"[{bookmaker}] "
-                f"status={status} "
-                f"confirmed={len(confirmed)}"
+            log(
+                f"[{bookmaker}] status={status} confirmed={len(confirmed)} "
+                f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
             )
 
             return {
@@ -2213,10 +2248,11 @@ def browser_check_one(
             }
 
     except Exception as exc:
-        print(
-            f"[{bookmaker}] "
-            f"UNHANDLED ERROR: {exc}"
+        log(
+            f"[{bookmaker}] UNHANDLED ERROR: {exc} | "
+            f"elapsed={time.monotonic() - bookmaker_started:.1f}s"
         )
+        log(traceback.format_exc())
 
         return {
             "bookmaker": bookmaker,
@@ -2226,17 +2262,31 @@ def browser_check_one(
         }
 
     finally:
+        cleanup_started = time.monotonic()
+
+        try:
+            if page:
+                page.close(run_before_unload=False)
+        except Exception as exc:
+            log(f"[{bookmaker}] page close warning: {exc}")
+
         try:
             if context:
                 context.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log(f"[{bookmaker}] context close warning: {exc}")
 
         try:
             if browser:
                 browser.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log(f"[{bookmaker}] browser close warning: {exc}")
+
+        log(
+            f"[{bookmaker}] CLEANUP complete | "
+            f"cleanup={time.monotonic() - cleanup_started:.2f}s | "
+            f"total={time.monotonic() - bookmaker_started:.1f}s"
+        )
 
 
 # ============================================================
@@ -2257,11 +2307,13 @@ def scan_bookmakers(matches):
         ),
     )
 
-    print(
-        f"[BOOKMAKERS] "
-        f"Starting {len(BOOKMAKERS)} sites "
-        f"with {worker_count} workers"
+    bookmakers_started = time.monotonic()
+
+    log(
+        f"[BOOKMAKERS] START | sites={len(BOOKMAKERS)} "
+        f"workers={worker_count} matches={len(matches)}"
     )
+    update_scanner_state(phase="BOOKMAKERS", last_error=None)
 
     with ThreadPoolExecutor(
         max_workers=worker_count
@@ -2287,9 +2339,14 @@ def scan_bookmakers(matches):
             try:
                 result = future.result()
                 results.append(result)
+                log(
+                    f"[BOOKMAKERS] DONE | {bookmaker} | "
+                    f"status={result.get('status')} | "
+                    f"confirmed={len(result.get('matches', []))}"
+                )
 
             except Exception as exc:
-                print(
+                log(
                     f"[BOOKMAKERS] "
                     f"{bookmaker} worker error: "
                     f"{exc}"
@@ -2304,6 +2361,10 @@ def scan_bookmakers(matches):
                     }
                 )
 
+    log(
+        f"[BOOKMAKERS] ALL DONE | elapsed={time.monotonic() - bookmakers_started:.1f}s | "
+        f"results={len(results)}"
+    )
     return results
 
 
@@ -2311,16 +2372,37 @@ def scan_bookmakers(matches):
 # TELEGRAM
 # ============================================================
 
+def telegram_send_test_message():
+    """Send one diagnostic Telegram message when the process starts."""
+    message = (
+        "🧪 TEST MESSAGE\n\n"
+        "أهلاً بك يا ديلوفان.\n\n"
+        f"✅ {APP_VERSION}\n"
+        "✅ Telegram test message sent successfully.\n"
+        "🕒 " + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )
+
+    log("[TEST] Sending Telegram test message...")
+    ok = telegram_send(message)
+
+    if ok:
+        log("[TEST] Telegram test message delivered successfully")
+    else:
+        log("[TEST] Telegram test message FAILED")
+
+    return ok
+
+
 def telegram_send(message):
     if not TELEGRAM_BOT_TOKEN:
-        print(
+        log(
             "[TELEGRAM] "
             "TELEGRAM_BOT_TOKEN missing"
         )
         return False
 
     if not TELEGRAM_CHAT_ID:
-        print(
+        log(
             "[TELEGRAM] "
             "TELEGRAM_CHAT_ID missing"
         )
@@ -2345,7 +2427,7 @@ def telegram_send(message):
         )
 
         if response.status_code != 200:
-            print(
+            log(
                 f"[TELEGRAM] HTTP="
                 f"{response.status_code}"
             )
@@ -2354,13 +2436,13 @@ def telegram_send(message):
         data = response.json()
 
         if data.get("ok") is True:
-            print(
+            log(
                 "[TELEGRAM] "
                 "Message delivered successfully"
             )
             return True
 
-        print(
+        log(
             f"[TELEGRAM] API rejected message: "
             f"{data}"
         )
@@ -2368,7 +2450,7 @@ def telegram_send(message):
         return False
 
     except Exception as exc:
-        print(
+        log(
             f"[TELEGRAM] ERROR: {exc}"
         )
         return False
@@ -2425,7 +2507,7 @@ def send_same_match_alert(
 
     with sent_alerts_lock:
         if key in sent_alerts:
-            print(
+            log(
                 f"[ALERT] Duplicate skipped: "
                 f"{bookmaker} | "
                 f"{match['home']} - "
@@ -2485,7 +2567,7 @@ def send_same_match_alert(
     )
 
     if not telegram_ok:
-        print(
+        log(
             "[ALERT] Telegram failed -> "
             "sent_alerts NOT updated"
         )
@@ -2499,7 +2581,7 @@ def send_same_match_alert(
     with sent_alerts_lock:
         sent_alerts.add(key)
 
-    print(
+    log(
         f"[ALERT] Successfully recorded: "
         f"{bookmaker} | "
         f"{match['home']} - "
@@ -2515,92 +2597,106 @@ def send_same_match_alert(
 
 def process_scan():
     started = time.monotonic()
+    scan_started_wall = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    print(
-        "\n"
-        "=================================================="
+    update_scanner_state(
+        active=True,
+        phase="STARTING",
+        scan_started_at=scan_started_wall,
+        last_scan_started_at=scan_started_wall,
+        last_error=None,
     )
 
-    print(
-        f"[SCAN] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
+    log("\n==================================================")
+    log(f"[SCAN] START {scan_started_wall}")
 
     # --------------------------------------------------------
-    # KOOORA
+    # KOOORA FETCH
     # --------------------------------------------------------
+    update_scanner_state(phase="KOOORA_FETCH")
+    kooora_started = time.monotonic()
+    log("[SCAN] Kooora fetch START")
 
     html = fetch_kooora_html()
+    kooora_elapsed = time.monotonic() - kooora_started
 
     if not html:
-        print(
-            "[SCAN] Kooora unavailable"
+        log(f"[SCAN] Kooora fetch FAILED | elapsed={kooora_elapsed:.2f}s")
+        update_scanner_state(
+            active=False,
+            phase="IDLE",
+            last_scan_finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            last_scan_duration_seconds=round(time.monotonic() - started, 2),
+            last_kooora_matches=0,
+            last_bookmaker_results=0,
+            last_error="Kooora unavailable",
         )
-        return
+        log("==================================================")
+        return False
 
-    matches = parse_kooora(
-        html
-    )
+    log(f"[SCAN] Kooora fetch DONE | elapsed={kooora_elapsed:.2f}s | html={len(html)}")
+
+    # --------------------------------------------------------
+    # KOOORA PARSE
+    # --------------------------------------------------------
+    update_scanner_state(phase="KOOORA_PARSE")
+    parse_started = time.monotonic()
+    log("[SCAN] Kooora parsing START")
+
+    matches = parse_kooora(html)
+    parse_elapsed = time.monotonic() - parse_started
+    update_scanner_state(last_kooora_matches=len(matches))
+
+    log(f"[SCAN] Kooora parsing DONE | elapsed={parse_elapsed:.2f}s | matches={len(matches)}")
 
     if not matches:
-        print(
-            "[SCAN] "
-            "No Kooora HT/FT matches"
+        finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        total = time.monotonic() - started
+        update_scanner_state(
+            active=False,
+            phase="IDLE",
+            last_scan_finished_at=finished,
+            last_successful_scan_at=finished,
+            last_scan_duration_seconds=round(total, 2),
+            last_bookmaker_results=0,
+            last_error=None,
         )
-        return
+        log(f"[SCAN] No Kooora HT/FT matches | total={total:.2f}s")
+        log("==================================================")
+        return True
 
-    print(
-        f"[SCAN] "
-        f"Checking {len(matches)} "
-        f"Kooora HT/FT matches against "
+    log(
+        f"[SCAN] Checking {len(matches)} Kooora HT/FT matches against "
         f"{len(BOOKMAKERS)} bookmakers"
     )
-
-    print(
-        f"[SCAN] "
-        f"Strict confidence >= "
-        f"{MIN_MATCH_CONFIDENCE:.2f}"
-    )
+    log(f"[SCAN] Strict confidence >= {MIN_MATCH_CONFIDENCE:.2f}")
 
     # --------------------------------------------------------
     # BOOKMAKERS
     # --------------------------------------------------------
-
-    results = scan_bookmakers(
-        matches
+    bookmaker_started = time.monotonic()
+    results = scan_bookmakers(matches)
+    bookmaker_elapsed = time.monotonic() - bookmaker_started
+    update_scanner_state(
+        phase="RESULT_PROCESSING",
+        last_bookmaker_results=len(results),
     )
+    log(f"[SCAN] Bookmaker phase DONE | elapsed={bookmaker_elapsed:.2f}s | results={len(results)}")
 
     confirmed = 0
     alerts_sent = 0
-
     status_counts = {}
 
     # --------------------------------------------------------
-    # RESULTS
+    # RESULTS / TELEGRAM
     # --------------------------------------------------------
-
+    result_started = time.monotonic()
     for result in results:
+        status = result.get("status", "UNKNOWN")
+        status_counts[status] = status_counts.get(status, 0) + 1
 
-        status = result.get(
-            "status",
-            "UNKNOWN",
-        )
-
-        status_counts[
-            status
-        ] = status_counts.get(
-            status,
-            0,
-        ) + 1
-
-        for found in result.get(
-            "matches",
-            [],
-        ):
-
-            # Only explicitly confirmed states.
-            if found.get(
-                "status"
-            ) not in {
+        for found in result.get("matches", []):
+            if found.get("status") not in {
                 "PREMATCH",
                 "SCHEDULED_TIME",
             }:
@@ -2608,32 +2704,32 @@ def process_scan():
 
             confirmed += 1
 
-            if send_same_match_alert(
-                result,
-                found,
-            ):
+            if send_same_match_alert(result, found):
                 alerts_sent += 1
 
-    # --------------------------------------------------------
-    # LOG
-    # --------------------------------------------------------
+    result_elapsed = time.monotonic() - result_started
+    total = time.monotonic() - started
+    finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    elapsed = (
-        time.monotonic()
-        - started
+    update_scanner_state(
+        active=False,
+        phase="IDLE",
+        last_scan_finished_at=finished,
+        last_successful_scan_at=finished,
+        last_scan_duration_seconds=round(total, 2),
+        last_error=None,
     )
 
-    print(
-        f"[SCAN] Done in {elapsed:.1f}s | "
-        f"bookmaker statuses="
-        f"{status_counts} | "
-        f"confirmed={confirmed} | "
-        f"alerts_sent={alerts_sent}"
+    log(
+        f"[SCAN] Result/Telegram phase DONE | elapsed={result_elapsed:.2f}s"
     )
-
-    print(
-        "=================================================="
+    log(
+        f"[SCAN] DONE | total={total:.2f}s | "
+        f"bookmaker_statuses={status_counts} | "
+        f"confirmed={confirmed} | alerts_sent={alerts_sent}"
     )
+    log("==================================================")
+    return True
 
 
 # ============================================================
@@ -2641,41 +2737,42 @@ def process_scan():
 # ============================================================
 
 def scanner_loop():
-    print(
+    log(
         f"[START] {APP_VERSION}"
     )
 
-    print(
+    log(
         "[START] "
         "Kooora HT/FT -> "
         "strict bookmaker PREMATCH verification"
     )
 
-    print(
+    log(
         f"[START] "
         f"interval={SCAN_SECONDS}s"
     )
 
-    print(
+    log(
         f"[START] "
         f"MAX_BROWSER_WORKERS="
         f"{MAX_BROWSER_WORKERS}"
     )
 
-    print(
+    log(
         f"[START] "
         f"MIN_MATCH_CONFIDENCE="
         f"{MIN_MATCH_CONFIDENCE}"
     )
 
-    print(
-        f"[START] "
-        f"Playwright="
+    log(
+        f"[START] Playwright="
         f"{'AVAILABLE' if PLAYWRIGHT_AVAILABLE else 'NOT INSTALLED'}"
     )
+    log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms")
+    log("[START] Health endpoint: /health")
 
     if not PLAYWRIGHT_AVAILABLE:
-        print(
+        log(
             "[START] WARNING: "
             "Bookmaker browser verification is disabled "
             "because Playwright is unavailable."
@@ -2709,7 +2806,7 @@ def scanner_loop():
             )
 
             if not acquired:
-                print(
+                log(
                     "[SCAN] Previous scan still running -> skip overlap"
                 )
 
@@ -2721,10 +2818,16 @@ def scanner_loop():
                     scan_lock.release()
 
         except Exception as exc:
-            print(
-                f"[SCAN] "
-                f"UNHANDLED ERROR: {exc}"
+            finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            update_scanner_state(
+                active=False,
+                phase="IDLE",
+                last_scan_finished_at=finished,
+                last_scan_duration_seconds=round(time.monotonic() - cycle_started, 2),
+                last_error=str(exc),
             )
+            log(f"[SCAN] UNHANDLED ERROR: {exc}")
+            log(traceback.format_exc())
 
         # ----------------------------------------------------
         # Calculate exact next cycle.
@@ -2739,7 +2842,7 @@ def scanner_loop():
         )
 
         if sleep_for > 0:
-            print(
+            log(
                 f"[SCAN] "
                 f"Next cycle in "
                 f"{sleep_for:.1f}s"
@@ -2752,7 +2855,7 @@ def scanner_loop():
         else:
             # Scan took longer than interval.
             # Do not add another full 60 seconds.
-            print(
+            log(
                 "[SCAN] "
                 "Cycle exceeded interval -> "
                 "starting next cycle immediately"
@@ -2776,10 +2879,16 @@ if __name__ == "__main__":
         )
     )
 
-    print(
+    log(
         f"[MAIN] Starting "
         f"{APP_VERSION}"
     )
+
+    # --------------------------------------------------------
+    # TELEGRAM TEST MESSAGE
+    # Sends once on every process start.
+    # --------------------------------------------------------
+    telegram_send_test_message()
 
     # One scanner thread only.
     scanner_thread = threading.Thread(
@@ -2799,4 +2908,3 @@ if __name__ == "__main__":
         debug=False,
         use_reloader=False,
     )
-
