@@ -85,7 +85,7 @@ def get_scanner_state():
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_7_RENDER_ASYNC_PLAYWRIGHT"
+APP_VERSION = "KOOORA_BROWSER_V3_8_RENDER_ASYNC_PLAYWRIGHT"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -1650,7 +1650,7 @@ async def internal_search(
         except Exception:
             pass
 
-        inputs = find_search_inputs(
+        inputs = await find_search_inputs(
             page
         )
 
@@ -2176,7 +2176,7 @@ async def browser_check_one_async(
 
         try:
             if playwright_cm:
-                await playwright_cm.stop()
+                await playwright_cm.__aexit__(None, None, None)
         except Exception as exc:
             log(f"[{bookmaker}] Playwright shutdown warning: {exc}")
 
