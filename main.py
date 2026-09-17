@@ -33,7 +33,7 @@ except Exception:
 
 # ============================================================
 # KOOORA MATCH TRACKER
-# VERSION 3.10
+# VERSION 3.13
 #
 # Main rule:
 #     DOUBT = REJECT
@@ -129,7 +129,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_12_FREE_MEMORY_SAFE_RENDER"
+APP_VERSION = "KOOORA_BROWSER_V3_13_FREE_MEMORY_SAFE_TIMEOUT"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -167,6 +167,9 @@ EVENT_WINDOW_CHARS = int(
 FREE_MODE = os.getenv("FREE_MODE", "1").strip() == "1"
 FREE_MEMORY_GUARD_MB = float(os.getenv("FREE_MEMORY_GUARD_MB", "380"))
 FREE_BOOKMAKER_BATCH_SIZE = int(os.getenv("FREE_BOOKMAKER_BATCH_SIZE", "6"))
+FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS = int(
+    os.getenv("FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS", "25")
+)
 MAX_DISCOVERY_LINKS = int(os.getenv("MAX_DISCOVERY_LINKS", "5" if FREE_MODE else "30"))
 MAX_CANDIDATE_PAGES_PER_MATCH = int(os.getenv("MAX_CANDIDATE_PAGES_PER_MATCH", "5" if FREE_MODE else "25"))
 MAX_SEARCH_VARIANTS = int(os.getenv("MAX_SEARCH_VARIANTS", "1" if FREE_MODE else "3"))
@@ -2355,9 +2358,27 @@ async def browser_check_one_async(
 
 
 def browser_check_one(bookmaker, homepage_url, matches):
-    """Sync wrapper that always runs the Async Playwright worker safely."""
+    """Sync wrapper with a hard wall-clock timeout around one bookmaker."""
     import asyncio
     import threading as _threading
+
+    async def run_with_timeout():
+        try:
+            return await asyncio.wait_for(
+                browser_check_one_async(bookmaker, homepage_url, matches),
+                timeout=FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            log(
+                f"[{bookmaker}] HARD TIMEOUT after "
+                f"{FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS}s -> SKIP"
+            )
+            return {
+                "bookmaker": bookmaker,
+                "status": "HARD_TIMEOUT",
+                "final_url": homepage_url,
+                "matches": [],
+            }
 
     try:
         asyncio.get_running_loop()
@@ -2366,18 +2387,14 @@ def browser_check_one(bookmaker, homepage_url, matches):
         running = False
 
     if not running:
-        return asyncio.run(
-            browser_check_one_async(bookmaker, homepage_url, matches)
-        )
+        return asyncio.run(run_with_timeout())
 
     result_holder = {}
     error_holder = {}
 
     def runner():
         try:
-            result_holder["result"] = asyncio.run(
-                browser_check_one_async(bookmaker, homepage_url, matches)
-            )
+            result_holder["result"] = asyncio.run(run_with_timeout())
         except Exception as exc:
             error_holder["error"] = exc
 
@@ -2401,6 +2418,7 @@ def browser_check_one(bookmaker, homepage_url, matches):
             "matches": [],
         },
     )
+
 
 # ============================================================
 # BOOKMAKER SCAN
@@ -2900,7 +2918,7 @@ def scanner_loop():
     log("[START] Playwright API=ASYNC (safe for asyncio and Render)")
     log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms")
     log("[START] Health endpoint: /health")
-    log(f"[START] FREE_MODE={FREE_MODE} | memory_guard={FREE_MEMORY_GUARD_MB:.0f}MB | batch={FREE_BOOKMAKER_BATCH_SIZE}")
+    log(f"[START] FREE_MODE={FREE_MODE} | memory_guard={FREE_MEMORY_GUARD_MB:.0f}MB | batch={FREE_BOOKMAKER_BATCH_SIZE} | bookmaker_timeout={FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS}s")
     log(f"[START] discovery_links={MAX_DISCOVERY_LINKS} | candidate_pages={MAX_CANDIDATE_PAGES_PER_MATCH} | search_variants={MAX_SEARCH_VARIANTS} | search_inputs={MAX_SEARCH_INPUTS}")
 
     if not PLAYWRIGHT_AVAILABLE:
