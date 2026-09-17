@@ -8,6 +8,8 @@ import re
 import time
 import threading
 import unicodedata
+import gc
+import resource
 from datetime import datetime
 
 import traceback
@@ -82,10 +84,25 @@ def get_scanner_state():
 
 
 # ============================================================
+# MEMORY SAFETY
+# ============================================================
+
+def memory_mb():
+    try:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    except Exception:
+        return 0.0
+
+
+def log_memory(label):
+    log(f"[MEMORY] {label} | peak_rss={memory_mb():.1f} MB")
+
+
+# ============================================================
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_10_RENDER_ASYNC_PLAYWRIGHT"
+APP_VERSION = "KOOORA_BROWSER_V3_11_MEMORY_SAFE_RENDER"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -1959,13 +1976,23 @@ async def browser_check_one_async(
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--disable-background-networking",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                    "--disable-extensions",
+                    "--disable-features=Translate,BackForwardCache",
+                    "--no-first-run",
+                    "--no-default-browser-check",
                 ],
             )
         finally:
             browser_launch_lock.release()
 
         context = await browser.new_context(
-            viewport={"width": 1440, "height": 1000},
+            viewport={"width": 1280, "height": 720},
+            service_workers="block",
             locale="de-DE",
             timezone_id="Europe/Berlin",
             user_agent=(
@@ -1976,6 +2003,24 @@ async def browser_check_one_async(
         )
 
         page = await context.new_page()
+
+        # Memory-safe browsing: keep scripts/styles/HTML, but avoid large
+        # image, media and font payloads that do not help event verification.
+        async def _memory_route(route):
+            try:
+                resource_type = route.request.resource_type
+                if resource_type in {"image", "media", "font"}:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            except Exception:
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+
+        await context.route("**/*", _memory_route)
+        log_memory(f"{bookmaker} after context/page setup")
 
         try:
             response = await page.goto(
@@ -2211,6 +2256,15 @@ async def browser_check_one_async(
         except Exception as exc:
             log(f"[{bookmaker}] Playwright shutdown warning: {exc}")
 
+        # Drop large Playwright/page references and ask Python to reclaim
+        # cyclic objects before the next bookmaker starts.
+        page = None
+        context = None
+        browser = None
+        playwright = None
+        gc.collect()
+        log_memory(f"{bookmaker} after cleanup")
+
         log(
             f"[{bookmaker}] CLEANUP complete | "
             f"cleanup={time.monotonic() - cleanup_started:.2f}s | "
@@ -2285,6 +2339,8 @@ def scan_bookmakers(matches):
     )
 
     bookmakers_started = time.monotonic()
+    gc.collect()
+    log_memory("before bookmaker scan")
 
     log(
         f"[BOOKMAKERS] START | sites={len(BOOKMAKERS)} "
@@ -2338,6 +2394,8 @@ def scan_bookmakers(matches):
                     }
                 )
 
+    gc.collect()
+    log_memory("after bookmaker scan")
     log(
         f"[BOOKMAKERS] ALL DONE | elapsed={time.monotonic() - bookmakers_started:.1f}s | "
         f"results={len(results)}"
@@ -2736,10 +2794,10 @@ def scanner_loop():
     )
 
     log(
-        "[START] V3.10 overlap protection=ENABLED"
+        "[START] V3.11 overlap protection=ENABLED"
     )
     log(
-        "[START] V3.10 Chromium launch serialization=ENABLED"
+        "[START] V3.11 Chromium launch serialization=ENABLED"
     )
 
     log(
@@ -2880,14 +2938,9 @@ if __name__ == "__main__":
         f"{APP_VERSION}"
     )
 
-    # --------------------------------------------------------
-    # STARTUP TESTS
-    # --------------------------------------------------------
-    log(
-        "--- [TEST MESSAGE] V3.10 Diagnostic: "
-        "نظام الفحص يعمل بشكل سليم ---"
-    )
-    telegram_send_test_message()
+    # V3.11: no Telegram startup diagnostic. A restart must not create
+    # noise or consume Telegram requests; real alerts remain unchanged.
+    log("[MAIN] V3.11 startup diagnostic Telegram disabled")
 
     # One scanner thread only.
     scanner_thread = threading.Thread(
