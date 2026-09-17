@@ -9,6 +9,7 @@ import time
 import threading
 import unicodedata
 import gc
+import multiprocessing as mp
 import resource
 from pathlib import Path
 from datetime import datetime
@@ -129,7 +130,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_14_FREE_CLEAN_TIMEOUT_ROTATION"
+APP_VERSION = "KOOORA_BROWSER_V3_15_FREE_KOOORA_HARD_TIMEOUT_ROTATION"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -169,6 +170,9 @@ FREE_MEMORY_GUARD_MB = float(os.getenv("FREE_MEMORY_GUARD_MB", "380"))
 FREE_BOOKMAKER_BATCH_SIZE = int(os.getenv("FREE_BOOKMAKER_BATCH_SIZE", "2"))
 FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS = int(
     os.getenv("FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS", "22")
+)
+KOOORA_HARD_TIMEOUT_SECONDS = int(
+    os.getenv("KOOORA_HARD_TIMEOUT_SECONDS", "25")
 )
 MAX_DISCOVERY_LINKS = int(os.getenv("MAX_DISCOVERY_LINKS", "5" if FREE_MODE else "30"))
 MAX_CANDIDATE_PAGES_PER_MATCH = int(os.getenv("MAX_CANDIDATE_PAGES_PER_MATCH", "5" if FREE_MODE else "25"))
@@ -740,6 +744,38 @@ def has_explicit_match_time(text):
 # KOOORA
 # ============================================================
 
+def _kooora_fetch_worker(url, headers, connect_timeout, read_timeout, conn):
+    """
+    Isolated worker so a stuck network call can be force-terminated by
+    the parent process. This provides a true wall-clock bound for Kooora.
+    """
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=(connect_timeout, read_timeout),
+        )
+        conn.send({
+            "ok": True,
+            "status_code": response.status_code,
+            "url": response.url,
+            "text": response.text,
+        })
+    except Exception as exc:
+        try:
+            conn.send({
+                "ok": False,
+                "error": str(exc),
+            })
+        except Exception:
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def fetch_kooora_html():
     headers = {
         "User-Agent": (
@@ -756,27 +792,99 @@ def fetch_kooora_html():
         KOOORA_FALLBACK_URL,
     ]
 
+    # Keep connect/read timeouts below the hard wall-clock limit.
+    connect_timeout = min(8, max(3, KOOORA_HARD_TIMEOUT_SECONDS // 3))
+    read_timeout = max(5, KOOORA_HARD_TIMEOUT_SECONDS - connect_timeout - 2)
+
     for url in urls:
-        try:
-            response = requests.get(
+        parent_conn, child_conn = mp.get_context("fork").Pipe(duplex=False)
+        process = mp.get_context("fork").Process(
+            target=_kooora_fetch_worker,
+            args=(
                 url,
-                headers=headers,
-                timeout=HTTP_TIMEOUT,
-            )
+                headers,
+                connect_timeout,
+                read_timeout,
+                child_conn,
+            ),
+            daemon=True,
+        )
 
-            log(
-                f"[KOOORA] HTTP={response.status_code} "
-                f"url={response.url} "
-                f"length={len(response.text)}"
-            )
+        started = time.time()
 
-            if response.status_code == 200:
-                return response.text
+        try:
+            process.start()
+            child_conn.close()
+
+            process.join(KOOORA_HARD_TIMEOUT_SECONDS)
+
+            if process.is_alive():
+                log(
+                    f"[KOOORA] HARD TIMEOUT after "
+                    f"{KOOORA_HARD_TIMEOUT_SECONDS}s url={url} -> terminate"
+                )
+                process.terminate()
+                process.join(3)
+
+                if process.is_alive():
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                    process.join(2)
+
+                continue
+
+            payload = None
+            try:
+                if parent_conn.poll(0.5):
+                    payload = parent_conn.recv()
+            except Exception:
+                payload = None
+
+            if not payload:
+                log(
+                    f"[KOOORA] worker returned no payload "
+                    f"url={url} elapsed={time.time()-started:.1f}s"
+                )
+                continue
+
+            if payload.get("ok"):
+                status_code = int(payload.get("status_code", 0))
+                final_url = payload.get("url", url)
+                html = payload.get("text", "")
+
+                log(
+                    f"[KOOORA] HTTP={status_code} "
+                    f"url={final_url} "
+                    f"length={len(html)}"
+                )
+
+                if status_code == 200:
+                    return html
+            else:
+                log(
+                    f"[KOOORA] ERROR {url}: "
+                    f"{payload.get('error', 'unknown worker error')}"
+                )
 
         except Exception as exc:
             log(
-                f"[KOOORA] ERROR {url}: {exc}"
+                f"[KOOORA] WORKER ERROR {url}: {exc}"
             )
+
+        finally:
+            try:
+                parent_conn.close()
+            except Exception:
+                pass
+
+            try:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(2)
+            except Exception:
+                pass
 
     return ""
 
@@ -2902,7 +3010,7 @@ def scanner_loop():
     log("[START] Playwright API=ASYNC (safe for asyncio and Render)")
     log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms")
     log("[START] Health endpoint: /health")
-    log(f"[START] FREE_MODE={FREE_MODE} | memory_guard={FREE_MEMORY_GUARD_MB:.0f}MB | batch={FREE_BOOKMAKER_BATCH_SIZE} | bookmaker_timeout={FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS}s")
+    log(f"[START] FREE_MODE={FREE_MODE} | memory_guard={FREE_MEMORY_GUARD_MB:.0f}MB | batch={FREE_BOOKMAKER_BATCH_SIZE} | bookmaker_timeout={FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS}s | kooora_timeout={KOOORA_HARD_TIMEOUT_SECONDS}s")
     log(f"[START] discovery_links={MAX_DISCOVERY_LINKS} | candidate_pages={MAX_CANDIDATE_PAGES_PER_MATCH} | search_variants={MAX_SEARCH_VARIANTS} | search_inputs={MAX_SEARCH_INPUTS}")
 
     if not PLAYWRIGHT_AVAILABLE:
