@@ -10,6 +10,7 @@ import threading
 import unicodedata
 import gc
 import resource
+from pathlib import Path
 from datetime import datetime
 
 import traceback
@@ -95,14 +96,40 @@ def memory_mb():
 
 
 def log_memory(label):
-    log(f"[MEMORY] {label} | peak_rss={memory_mb():.1f} MB")
+    log(f"[MEMORY] {label} | peak_rss={memory_mb():.1f} MB | cgroup={cgroup_memory_mb():.1f} MB")
+
+
+def cgroup_memory_mb():
+    """Best-effort total container memory, including Chromium child processes."""
+    paths = (
+        "/sys/fs/cgroup/memory.current",
+        "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+    )
+    for path in paths:
+        try:
+            raw = Path(path).read_text().strip()
+            if raw and raw.isdigit():
+                return int(raw) / (1024.0 * 1024.0)
+        except Exception:
+            continue
+    return 0.0
+
+
+def memory_guarded(limit_mb=380.0):
+    current = cgroup_memory_mb()
+    if current and current >= limit_mb:
+        log(
+            f"[MEMORY GUARD] current={current:.1f} MB >= limit={limit_mb:.1f} MB"
+        )
+        return True
+    return False
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_11_MEMORY_SAFE_RENDER"
+APP_VERSION = "KOOORA_BROWSER_V3_12_FREE_MEMORY_SAFE_RENDER"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -135,9 +162,21 @@ EVENT_WINDOW_CHARS = int(
     os.getenv("EVENT_WINDOW_CHARS", "900")
 )
 
+# Free Render is only 512 MB, so the free profile deliberately trades
+# breadth/depth for stability and accepts more false-negative skips.
+FREE_MODE = os.getenv("FREE_MODE", "1").strip() == "1"
+FREE_MEMORY_GUARD_MB = float(os.getenv("FREE_MEMORY_GUARD_MB", "380"))
+FREE_BOOKMAKER_BATCH_SIZE = int(os.getenv("FREE_BOOKMAKER_BATCH_SIZE", "6"))
+MAX_DISCOVERY_LINKS = int(os.getenv("MAX_DISCOVERY_LINKS", "5" if FREE_MODE else "30"))
+MAX_CANDIDATE_PAGES_PER_MATCH = int(os.getenv("MAX_CANDIDATE_PAGES_PER_MATCH", "5" if FREE_MODE else "25"))
+MAX_SEARCH_VARIANTS = int(os.getenv("MAX_SEARCH_VARIANTS", "1" if FREE_MODE else "3"))
+MAX_SEARCH_INPUTS = int(os.getenv("MAX_SEARCH_INPUTS", "1" if FREE_MODE else "3"))
+MAX_SEARCH_LINKS = int(os.getenv("MAX_SEARCH_LINKS", "3" if FREE_MODE else "20"))
+MAX_EVENT_BLOCKS_FREE = int(os.getenv("MAX_EVENT_BLOCKS_FREE", "120"))
+
 # Maximum number of candidate DOM event blocks inspected.
 MAX_EVENT_BLOCKS = int(
-    os.getenv("MAX_EVENT_BLOCKS", "500")
+    os.getenv("MAX_EVENT_BLOCKS", str(MAX_EVENT_BLOCKS_FREE if FREE_MODE else 500))
 )
 
 HTTP_TIMEOUT = int(
@@ -313,6 +352,8 @@ scan_lock = threading.Lock()
 # bookmaker tasks. This is intentionally independent of the
 # scanner lock.
 browser_launch_lock = threading.Lock()
+bookmaker_rotation_lock = threading.Lock()
+bookmaker_rotation_index = 0
 
 
 # ============================================================
@@ -977,7 +1018,8 @@ def parse_kooora(html):
 
             home, away = candidates[0], candidates[1]
             home_norm, away_norm = normalize_team(home), normalize_team(away)
-            if not home_norm or not away_norm:
+            if not home_norm or not away_norm or home_norm == away_norm:
+                skip_counts["NO_TEAMS"] += 1
                 continue
 
             home_score, away_score = extract_kooora_score(card, text)
@@ -1539,58 +1581,78 @@ async def collect_candidate_links(
     base_url,
     match,
 ):
-    links = await collect_links(page)
+    """Memory-safe event-link discovery.
+
+    The old implementation first copied every <a> element into Python,
+    which can be a very large list on bookmaker homepages. Free mode now
+    filters inside the browser and returns only a tiny bounded set.
+    """
+    home_terms = meaningful_tokens(match.get("home", ""))
+    away_terms = meaningful_tokens(match.get("away", ""))
+    limit = max(1, MAX_DISCOVERY_LINKS)
+
+    keywords = [
+        "football", "soccer", "sport", "fussball", "fußball",
+        "match", "matches", "event", "events", "fixture", "fixtures",
+        "game", "games", "wetten", "bet", "prematch", "pre-match", "live",
+    ]
+
+    script = """
+    (data) => {
+        const out = [];
+        const seen = new Set();
+        const anchors = document.querySelectorAll('a[href]');
+
+        for (const a of anchors) {
+            if (out.length >= data.limit) break;
+            const href = a.href || '';
+            const text = (a.innerText || '').replace(/\\s+/g, ' ').trim();
+            if (!href || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) continue;
+
+            const combined = (href + ' ' + text).toLowerCase();
+            const sport = data.keywords.some(k => combined.includes(k));
+            const team = [...data.homeTerms, ...data.awayTerms].some(t => t && combined.includes(t));
+            if (!sport && !team) continue;
+            if (seen.has(href)) continue;
+            seen.add(href);
+            out.push({href, text});
+        }
+        return out;
+    }
+    """
+
+    try:
+        links = await page.locator("a[href]").evaluate_all(
+            script,
+            {
+                "limit": limit,
+                "keywords": keywords,
+                "homeTerms": home_terms,
+                "awayTerms": away_terms,
+            },
+        )
+    except Exception:
+        return []
+
+    if not isinstance(links, list):
+        return []
 
     candidates = []
-
     seen = set()
-
     for link in links:
-        href = clean_text(
-            link.get("href", "")
-        )
-
+        href = clean_text(link.get("href", ""))
         if not href:
             continue
-
-        if href.startswith(
-            (
-                "javascript:",
-                "mailto:",
-                "tel:",
-                "#",
-            )
-        ):
+        absolute = urljoin(base_url, href)
+        if not same_domain(base_url, absolute):
             continue
-
-        absolute = urljoin(
-            base_url,
-            href,
-        )
-
-        if not same_domain(
-            base_url,
-            absolute,
-        ):
-            continue
-
         if absolute in seen:
             continue
-
-        if not (
-            link_looks_sport_or_event(link)
-            or link_contains_team(
-                link,
-                match,
-            )
-        ):
-            continue
-
         seen.add(absolute)
-
         candidates.append(absolute)
-
-    return candidates[:120]
+        if len(candidates) >= limit:
+            break
+    return candidates
 
 
 # ============================================================
@@ -1657,7 +1719,7 @@ async def internal_search(
         ),
     ]
 
-    for first, second in searches:
+    for first, second in searches[:MAX_SEARCH_VARIANTS]:
         try:
             await page.goto(
                 homepage_url,
@@ -1682,7 +1744,7 @@ async def internal_search(
         if not inputs:
             continue
 
-        for search_input in inputs[:3]:
+        for search_input in inputs[:MAX_SEARCH_INPUTS]:
             try:
                 await search_input.fill(
                     ""
@@ -1731,7 +1793,7 @@ async def internal_search(
                 if links:
                     return {
                         "status": "SEARCH_FOUND",
-                        "links": links,
+                        "links": links[:MAX_SEARCH_LINKS],
                     }
 
             except (
@@ -1941,6 +2003,14 @@ async def browser_check_one_async(
     log(f"[{bookmaker}] START | targets={len(matches)}")
 
     try:
+        if FREE_MODE and memory_guarded(FREE_MEMORY_GUARD_MB):
+            return {
+                "bookmaker": bookmaker,
+                "status": "MEMORY_GUARD",
+                "final_url": homepage_url,
+                "matches": [],
+            }
+
         # Start the async Playwright runtime directly.
         # This object exposes the documented async stop() method.
         playwright = await async_playwright().start()
@@ -1982,7 +2052,11 @@ async def browser_check_one_async(
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
                     "--disable-extensions",
-                    "--disable-features=Translate,BackForwardCache",
+                    "--disable-features=Translate,BackForwardCache,TranslateUI,MediaRouter,OptimizationHints",
+                    "--disable-component-update",
+                    "--disable-default-apps",
+                    "--disable-sync",
+                    "--no-pings",
                     "--no-first-run",
                     "--no-default-browser-check",
                 ],
@@ -1991,7 +2065,7 @@ async def browser_check_one_async(
             browser_launch_lock.release()
 
         context = await browser.new_context(
-            viewport={"width": 1280, "height": 720},
+            viewport={"width": 1024, "height": 600},
             service_workers="block",
             locale="de-DE",
             timezone_id="Europe/Berlin",
@@ -2099,7 +2173,7 @@ async def browser_check_one_async(
 
             checked_links = set()
 
-            for candidate_url in candidate_links[:25]:
+            for candidate_url in candidate_links[:MAX_CANDIDATE_PAGES_PER_MATCH]:
                 if candidate_url in checked_links:
                     continue
                 checked_links.add(candidate_url)
@@ -2158,7 +2232,7 @@ async def browser_check_one_async(
             if search_result["status"] == "CAPTCHA":
                 continue
 
-            for search_url in search_result.get("links", [])[:20]:
+            for search_url in search_result.get("links", [])[:MAX_SEARCH_LINKS]:
                 try:
                     await page.goto(
                         search_url,
@@ -2189,6 +2263,14 @@ async def browser_check_one_async(
 
                 if verification.get("matches"):
                     break
+
+            # Free-mode hygiene: release the document/page between matches.
+            if match is not matches[-1]:
+                try:
+                    await page.close(run_before_unload=False)
+                except Exception:
+                    pass
+                page = await context.new_page()
 
         unique = {}
         for found in all_confirmed:
@@ -2324,75 +2406,80 @@ def browser_check_one(bookmaker, homepage_url, matches):
 # BOOKMAKER SCAN
 # ============================================================
 
+def select_bookmaker_batch():
+    global bookmaker_rotation_index
+
+    if not BOOKMAKERS:
+        return []
+
+    if not FREE_MODE or FREE_BOOKMAKER_BATCH_SIZE >= len(BOOKMAKERS):
+        return list(BOOKMAKERS)
+
+    with bookmaker_rotation_lock:
+        start = bookmaker_rotation_index % len(BOOKMAKERS)
+        selected = []
+        for offset in range(min(FREE_BOOKMAKER_BATCH_SIZE, len(BOOKMAKERS))):
+            selected.append(BOOKMAKERS[(start + offset) % len(BOOKMAKERS)])
+        bookmaker_rotation_index = (start + len(selected)) % len(BOOKMAKERS)
+        return selected
+
+
 def scan_bookmakers(matches):
     results = []
 
     if not matches:
         return results
 
-    worker_count = max(
-        1,
-        min(
-            MAX_BROWSER_WORKERS,
-            len(BOOKMAKERS),
-        ),
-    )
+    selected_bookmakers = select_bookmaker_batch()
+    worker_count = 1  # Free profile: never allow browser concurrency.
 
     bookmakers_started = time.monotonic()
     gc.collect()
     log_memory("before bookmaker scan")
 
     log(
-        f"[BOOKMAKERS] START | sites={len(BOOKMAKERS)} "
-        f"workers={worker_count} matches={len(matches)}"
+        f"[BOOKMAKERS] START | total_sites={len(BOOKMAKERS)} "
+        f"batch={len(selected_bookmakers)} workers={worker_count} "
+        f"matches={len(matches)} free_mode={FREE_MODE}"
     )
     update_scanner_state(phase="BOOKMAKERS", last_error=None)
 
-    with ThreadPoolExecutor(
-        max_workers=worker_count
-    ) as pool:
+    for bookmaker, url in selected_bookmakers:
+        if FREE_MODE and memory_guarded(FREE_MEMORY_GUARD_MB):
+            results.append({
+                "bookmaker": bookmaker,
+                "status": "MEMORY_GUARD",
+                "final_url": url,
+                "matches": [],
+            })
+            log(f"[BOOKMAKERS] MEMORY_GUARD -> skipping remaining site: {bookmaker}")
+            break
 
-        futures = {}
-
-        for bookmaker, url in BOOKMAKERS:
-            future = pool.submit(
-                browser_check_one,
-                bookmaker,
-                url,
-                matches,
+        try:
+            result = browser_check_one(bookmaker, url, matches)
+            results.append(result)
+            log(
+                f"[BOOKMAKERS] DONE | {bookmaker} | "
+                f"status={result.get('status')} | "
+                f"confirmed={len(result.get('matches', []))}"
             )
+        except Exception as exc:
+            log(f"[BOOKMAKERS] {bookmaker} worker error: {exc}")
+            results.append({
+                "bookmaker": bookmaker,
+                "status": "ERROR",
+                "final_url": "",
+                "matches": [],
+            })
 
-            futures[future] = bookmaker
-
-        for future in as_completed(
-            futures
-        ):
-            bookmaker = futures[future]
-
-            try:
-                result = future.result()
-                results.append(result)
-                log(
-                    f"[BOOKMAKERS] DONE | {bookmaker} | "
-                    f"status={result.get('status')} | "
-                    f"confirmed={len(result.get('matches', []))}"
-                )
-
-            except Exception as exc:
-                log(
-                    f"[BOOKMAKERS] "
-                    f"{bookmaker} worker error: "
-                    f"{exc}"
-                )
-
-                results.append(
-                    {
-                        "bookmaker": bookmaker,
-                        "status": "ERROR",
-                        "final_url": "",
-                        "matches": [],
-                    }
-                )
+        gc.collect()
+        if FREE_MODE:
+            # Give Chromium's child process a short window to exit before
+            # another browser is launched.
+            time.sleep(0.5)
+            if memory_guarded(FREE_MEMORY_GUARD_MB):
+                log("[BOOKMAKERS] Memory guard after cleanup -> stop this cycle")
+                break
 
     gc.collect()
     log_memory("after bookmaker scan")
@@ -2794,10 +2881,10 @@ def scanner_loop():
     )
 
     log(
-        "[START] V3.11 overlap protection=ENABLED"
+        "[START] V3.12 overlap protection=ENABLED"
     )
     log(
-        "[START] V3.11 Chromium launch serialization=ENABLED"
+        "[START] V3.12 Chromium launch serialization=ENABLED"
     )
 
     log(
@@ -2813,6 +2900,8 @@ def scanner_loop():
     log("[START] Playwright API=ASYNC (safe for asyncio and Render)")
     log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms")
     log("[START] Health endpoint: /health")
+    log(f"[START] FREE_MODE={FREE_MODE} | memory_guard={FREE_MEMORY_GUARD_MB:.0f}MB | batch={FREE_BOOKMAKER_BATCH_SIZE}")
+    log(f"[START] discovery_links={MAX_DISCOVERY_LINKS} | candidate_pages={MAX_CANDIDATE_PAGES_PER_MATCH} | search_variants={MAX_SEARCH_VARIANTS} | search_inputs={MAX_SEARCH_INPUTS}")
 
     if not PLAYWRIGHT_AVAILABLE:
         log(
@@ -2938,9 +3027,9 @@ if __name__ == "__main__":
         f"{APP_VERSION}"
     )
 
-    # V3.11: no Telegram startup diagnostic. A restart must not create
+    # V3.12: no Telegram startup diagnostic. A restart must not create
     # noise or consume Telegram requests; real alerts remain unchanged.
-    log("[MAIN] V3.11 startup diagnostic Telegram disabled")
+    log("[MAIN] V3.12 startup diagnostic Telegram disabled")
 
     # One scanner thread only.
     scanner_thread = threading.Thread(
