@@ -129,7 +129,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_13_FREE_MEMORY_SAFE_TIMEOUT"
+APP_VERSION = "KOOORA_BROWSER_V3_14_FREE_CLEAN_TIMEOUT_ROTATION"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -166,9 +166,9 @@ EVENT_WINDOW_CHARS = int(
 # breadth/depth for stability and accepts more false-negative skips.
 FREE_MODE = os.getenv("FREE_MODE", "1").strip() == "1"
 FREE_MEMORY_GUARD_MB = float(os.getenv("FREE_MEMORY_GUARD_MB", "380"))
-FREE_BOOKMAKER_BATCH_SIZE = int(os.getenv("FREE_BOOKMAKER_BATCH_SIZE", "6"))
+FREE_BOOKMAKER_BATCH_SIZE = int(os.getenv("FREE_BOOKMAKER_BATCH_SIZE", "2"))
 FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS = int(
-    os.getenv("FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS", "25")
+    os.getenv("FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS", "22")
 )
 MAX_DISCOVERY_LINKS = int(os.getenv("MAX_DISCOVERY_LINKS", "5" if FREE_MODE else "30"))
 MAX_CANDIDATE_PAGES_PER_MATCH = int(os.getenv("MAX_CANDIDATE_PAGES_PER_MATCH", "5" if FREE_MODE else "25"))
@@ -1662,6 +1662,12 @@ async def collect_candidate_links(
 # INTERNAL SEARCH
 # ============================================================
 
+def _deadline_remaining_ms(deadline):
+    if deadline is None:
+        return 10_000_000
+    return max(0, int((deadline - time.monotonic()) * 1000))
+
+
 async def find_search_inputs(page):
     selectors = [
         "input[type='search']",
@@ -1697,112 +1703,72 @@ async def internal_search(
     bookmaker,
     match,
     homepage_url,
+    deadline=None,
 ):
     """
-    Try normal visible-site search controls.
-
-    No API reverse engineering.
-    No CAPTCHA bypass.
-    No anti-bot bypass.
+    Try normal visible-site search controls without exceeding the bookmaker
+    deadline. No API reverse engineering and no CAPTCHA bypass.
     """
 
     searches = [
-        (
-            match["home"],
-            match["away"],
-        ),
-        (
-            match["away"],
-            match["home"],
-        ),
-        (
-            f"{match['home']} "
-            f"{match['away']}",
-            "",
-        ),
+        (match["home"], match["away"]),
+        (match["away"], match["home"]),
+        (f"{match['home']} {match['away']}", ""),
     ]
 
     for first, second in searches[:MAX_SEARCH_VARIANTS]:
+        if _deadline_remaining_ms(deadline) < 1000:
+            return {"status": "HARD_TIMEOUT", "links": []}
+
         try:
+            timeout_ms = max(1000, min(BROWSER_TIMEOUT_MS, _deadline_remaining_ms(deadline)))
             await page.goto(
                 homepage_url,
                 wait_until="domcontentloaded",
-                timeout=BROWSER_TIMEOUT_MS,
+                timeout=timeout_ms,
             )
 
-            await page.wait_for_timeout(
-                min(
-                    1500,
-                    BROWSER_WAIT_MS,
-                )
-            )
+            wait_ms = min(1500, BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
+            if wait_ms > 0:
+                await page.wait_for_timeout(wait_ms)
 
         except Exception:
             pass
 
-        inputs = await find_search_inputs(
-            page
-        )
+        if _deadline_remaining_ms(deadline) < 1000:
+            return {"status": "HARD_TIMEOUT", "links": []}
 
+        inputs = await find_search_inputs(page)
         if not inputs:
             continue
 
         for search_input in inputs[:MAX_SEARCH_INPUTS]:
+            if _deadline_remaining_ms(deadline) < 1000:
+                return {"status": "HARD_TIMEOUT", "links": []}
             try:
-                await search_input.fill(
-                    ""
-                )
+                await search_input.fill("")
+                await search_input.fill(first)
+                await search_input.press("Enter")
 
-                await search_input.fill(
-                    first
-                )
-
-                await search_input.press(
-                    "Enter"
-                )
-
-                await page.wait_for_timeout(
-                    2500
-                )
+                wait_ms = min(2500, max(0, _deadline_remaining_ms(deadline) - 250))
+                if wait_ms > 0:
+                    await page.wait_for_timeout(wait_ms)
 
                 title = await page.title()
+                text = await safe_body_text(page)
 
-                text = await safe_body_text(
-                    page
-                )
+                if protection_detected(title, text, page.url):
+                    log(f"[{bookmaker}] CAPTCHA/protection during internal search")
+                    return {"status": "CAPTCHA", "links": []}
 
-                if protection_detected(
-                    title,
-                    text,
-                    page.url,
-                ):
-                    log(
-                        f"[{bookmaker}] "
-                        f"CAPTCHA/protection "
-                        f"during internal search"
-                    )
-
-                    return {
-                        "status": "CAPTCHA",
-                        "links": [],
-                    }
-
-                links = await collect_candidate_links(
-                    page,
-                    page.url,
-                    match,
-                )
-
+                links = await collect_candidate_links(page, page.url, match)
                 if links:
                     return {
                         "status": "SEARCH_FOUND",
                         "links": links[:MAX_SEARCH_LINKS],
                     }
 
-            except (
-                PlaywrightTimeoutError,
-                Exception,
-            ):
+            except Exception:
                 continue
 
     return {
@@ -2002,10 +1968,25 @@ async def browser_check_one_async(
     page = None
     playwright = None
     bookmaker_started = time.monotonic()
+    deadline = bookmaker_started + FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS
 
-    log(f"[{bookmaker}] START | targets={len(matches)}")
+    log(f"[{bookmaker}] START | targets={len(matches)} | timeout={FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS}s")
 
     try:
+        def timed_out():
+            return _deadline_remaining_ms(deadline) < 750
+
+        def goto_timeout_ms():
+            return max(1000, min(BROWSER_TIMEOUT_MS, _deadline_remaining_ms(deadline)))
+
+        if timed_out():
+            return {
+                "bookmaker": bookmaker,
+                "status": "HARD_TIMEOUT",
+                "final_url": homepage_url,
+                "matches": [],
+            }
+
         if FREE_MODE and memory_guarded(FREE_MEMORY_GUARD_MB):
             return {
                 "bookmaker": bookmaker,
@@ -2097,15 +2078,26 @@ async def browser_check_one_async(
                     pass
 
         await context.route("**/*", _memory_route)
+        context.set_default_timeout(4000)
+        context.set_default_navigation_timeout(min(BROWSER_TIMEOUT_MS, 8000))
         log_memory(f"{bookmaker} after context/page setup")
 
         try:
+            if timed_out():
+                return {
+                    "bookmaker": bookmaker,
+                    "status": "HARD_TIMEOUT",
+                    "final_url": homepage_url,
+                    "matches": [],
+                }
             response = await page.goto(
                 homepage_url,
                 wait_until="domcontentloaded",
-                timeout=BROWSER_TIMEOUT_MS,
+                timeout=goto_timeout_ms(),
             )
-            await page.wait_for_timeout(BROWSER_WAIT_MS)
+            wait_ms = min(BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
+            if wait_ms > 0:
+                await page.wait_for_timeout(wait_ms)
 
         except PlaywrightTimeoutError:
             log(
@@ -2151,6 +2143,14 @@ async def browser_check_one_async(
         all_confirmed = []
 
         for match in matches:
+            if timed_out():
+                return {
+                    "bookmaker": bookmaker,
+                    "status": "HARD_TIMEOUT",
+                    "final_url": page.url if page else homepage_url,
+                    "matches": [],
+                }
+
             verification = await verify_page_for_match(
                 page, match, bookmaker
             )
@@ -2177,6 +2177,13 @@ async def browser_check_one_async(
             checked_links = set()
 
             for candidate_url in candidate_links[:MAX_CANDIDATE_PAGES_PER_MATCH]:
+                if timed_out():
+                    return {
+                        "bookmaker": bookmaker,
+                        "status": "HARD_TIMEOUT",
+                        "final_url": page.url if page else homepage_url,
+                        "matches": [],
+                    }
                 if candidate_url in checked_links:
                     continue
                 checked_links.add(candidate_url)
@@ -2185,11 +2192,11 @@ async def browser_check_one_async(
                     await page.goto(
                         candidate_url,
                         wait_until="domcontentloaded",
-                        timeout=BROWSER_TIMEOUT_MS,
+                        timeout=goto_timeout_ms(),
                     )
-                    await page.wait_for_timeout(
-                        min(BROWSER_WAIT_MS, 3000)
-                    )
+                    wait_ms = min(3000, BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
+                    if wait_ms > 0:
+                        await page.wait_for_timeout(wait_ms)
                 except Exception:
                     continue
 
@@ -2216,35 +2223,56 @@ async def browser_check_one_async(
             if any(x.get("match") == match for x in all_confirmed):
                 continue
 
+            if timed_out():
+                return {
+                    "bookmaker": bookmaker,
+                    "status": "HARD_TIMEOUT",
+                    "final_url": page.url if page else homepage_url,
+                    "matches": [],
+                }
             try:
                 await page.goto(
                     homepage_url,
                     wait_until="domcontentloaded",
-                    timeout=BROWSER_TIMEOUT_MS,
+                    timeout=goto_timeout_ms(),
                 )
-                await page.wait_for_timeout(
-                    min(BROWSER_WAIT_MS, 2500)
-                )
+                wait_ms = min(2500, BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
+                if wait_ms > 0:
+                    await page.wait_for_timeout(wait_ms)
             except Exception:
                 continue
 
             search_result = await internal_search(
-                page, bookmaker, match, homepage_url
+                page, bookmaker, match, homepage_url, deadline=deadline
             )
+            if search_result["status"] == "HARD_TIMEOUT":
+                return {
+                    "bookmaker": bookmaker,
+                    "status": "HARD_TIMEOUT",
+                    "final_url": page.url if page else homepage_url,
+                    "matches": [],
+                }
 
             if search_result["status"] == "CAPTCHA":
                 continue
 
             for search_url in search_result.get("links", [])[:MAX_SEARCH_LINKS]:
+                if timed_out():
+                    return {
+                        "bookmaker": bookmaker,
+                        "status": "HARD_TIMEOUT",
+                        "final_url": page.url if page else homepage_url,
+                        "matches": [],
+                    }
                 try:
                     await page.goto(
                         search_url,
                         wait_until="domcontentloaded",
-                        timeout=BROWSER_TIMEOUT_MS,
+                        timeout=goto_timeout_ms(),
                     )
-                    await page.wait_for_timeout(
-                        min(BROWSER_WAIT_MS, 3000)
-                    )
+                    wait_ms = min(3000, BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
+                    if wait_ms > 0:
+                        await page.wait_for_timeout(wait_ms)
                 except Exception:
                     continue
 
@@ -2274,6 +2302,8 @@ async def browser_check_one_async(
                 except Exception:
                     pass
                 page = await context.new_page()
+                page.set_default_timeout(4000)
+                page.set_default_navigation_timeout(min(BROWSER_TIMEOUT_MS, 8000))
 
         unique = {}
         for found in all_confirmed:
@@ -2358,65 +2388,19 @@ async def browser_check_one_async(
 
 
 def browser_check_one(bookmaker, homepage_url, matches):
-    """Sync wrapper with a hard wall-clock timeout around one bookmaker."""
+    """Run one bookmaker scan in a single async loop.
+
+    Timeout enforcement is deadline-based inside Playwright, so the coroutine
+    is not cancelled from another thread. This avoids orphaned Playwright
+    futures and TargetClosedError noise during cleanup.
+    """
     import asyncio
-    import threading as _threading
-
-    async def run_with_timeout():
-        try:
-            return await asyncio.wait_for(
-                browser_check_one_async(bookmaker, homepage_url, matches),
-                timeout=FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            log(
-                f"[{bookmaker}] HARD TIMEOUT after "
-                f"{FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS}s -> SKIP"
-            )
-            return {
-                "bookmaker": bookmaker,
-                "status": "HARD_TIMEOUT",
-                "final_url": homepage_url,
-                "matches": [],
-            }
-
-    try:
-        asyncio.get_running_loop()
-        running = True
-    except RuntimeError:
-        running = False
-
-    if not running:
-        return asyncio.run(run_with_timeout())
-
-    result_holder = {}
-    error_holder = {}
-
-    def runner():
-        try:
-            result_holder["result"] = asyncio.run(run_with_timeout())
-        except Exception as exc:
-            error_holder["error"] = exc
-
-    worker = _threading.Thread(
-        target=runner,
-        daemon=True,
-        name=f"playwright-{bookmaker}",
-    )
-    worker.start()
-    worker.join()
-
-    if "error" in error_holder:
-        raise error_holder["error"]
-
-    return result_holder.get(
-        "result",
-        {
-            "bookmaker": bookmaker,
-            "status": "ERROR",
-            "final_url": homepage_url,
-            "matches": [],
-        },
+    return asyncio.run(
+        browser_check_one_async(
+            bookmaker,
+            homepage_url,
+            matches,
+        )
     )
 
 
