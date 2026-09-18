@@ -34,7 +34,7 @@ except Exception:
 
 # ============================================================
 # KOOORA MATCH TRACKER
-# VERSION 3.19
+# VERSION 3.13
 #
 # Main rule:
 #     DOUBT = REJECT
@@ -130,7 +130,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_19_FREE_FAST_FAIL"
+APP_VERSION = "KOOORA_BROWSER_V3_20_FREE_FAST_FAIL"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -145,7 +145,7 @@ BROWSER_TIMEOUT_MS = int(
 )
 
 BROWSER_WAIT_MS = int(
-    os.getenv("BROWSER_WAIT_MS", "800")
+    os.getenv("BROWSER_WAIT_MS", "0")
 )
 
 MAX_BROWSER_WORKERS = int(
@@ -169,7 +169,7 @@ FREE_MODE = os.getenv("FREE_MODE", "1").strip() == "1"
 FREE_MEMORY_GUARD_MB = float(os.getenv("FREE_MEMORY_GUARD_MB", "380"))
 FREE_BOOKMAKER_BATCH_SIZE = int(os.getenv("FREE_BOOKMAKER_BATCH_SIZE", "2"))
 FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS = int(
-    os.getenv("FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS", "12")
+    os.getenv("FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS", "9")
 )
 KOOORA_HARD_TIMEOUT_SECONDS = int(
     os.getenv("KOOORA_HARD_TIMEOUT_SECONDS", "25")
@@ -1152,13 +1152,34 @@ def protection_detected(title, text, url):
     )
 
 
+FAST_BLOCK_URL_MARKERS = (
+    "/restrict/block",
+    "/access-denied",
+    "/access_denied",
+    "/forbidden",
+    "/blocked",
+    "/block/index",
+    "accessdenied",
+    "zugriff-verweigert",
+)
+
+
+def fast_http_rejection_status(status_code):
+    return status_code in {401, 403, 429, 451}
+
+
+def fast_block_url(url):
+    low = clean_text(url).lower()
+    return any(marker in low for marker in FAST_BLOCK_URL_MARKERS)
+
+
 async def safe_body_text(page):
     try:
         return clean_text(
             await page.locator(
                 "body"
             ).inner_text(
-                timeout=5000
+                timeout=1500
             )
         )
     except Exception:
@@ -2140,9 +2161,6 @@ async def browser_check_one_async(
                 wait_until="domcontentloaded",
                 timeout=goto_timeout_ms(),
             )
-            wait_ms = min(BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
-            if wait_ms > 0:
-                await page.wait_for_timeout(wait_ms)
 
         except PlaywrightTimeoutError:
             log(
@@ -2167,16 +2185,58 @@ async def browser_check_one_async(
                 "matches": [],
             }
 
+        http_status = response.status if response else 0
+        final_url = page.url
+
+        # V3.20 FAST-FAIL: do not spend the remaining timeout on pages that
+        # are already known to be blocked or unusable. This is deliberately
+        # conservative: anything not explicitly rejected continues to the
+        # strict event-window verifier.
+        if fast_http_rejection_status(http_status):
+            status = "CAPTCHA" if http_status in {403, 429, 451} else "HTTP_ERROR"
+            log(
+                f"[{bookmaker}] FAST-FAIL HTTP={http_status} "
+                f"final={final_url} -> {status}"
+            )
+            return {
+                "bookmaker": bookmaker,
+                "status": status,
+                "final_url": final_url,
+                "matches": [],
+            }
+
+        if fast_block_url(final_url):
+            log(
+                f"[{bookmaker}] FAST-FAIL blocked URL "
+                f"final={final_url}"
+            )
+            return {
+                "bookmaker": bookmaker,
+                "status": "CAPTCHA",
+                "final_url": final_url,
+                "matches": [],
+            }
+
         title = await page.title()
         body_text = await safe_body_text(page)
-        http_status = response.status if response else 0
 
         log(
             f"[{bookmaker}] HTTP={http_status} "
-            f"final={page.url} text={len(body_text)}"
+            f"final={final_url} text={len(body_text)}"
         )
 
-        if protection_detected(title, body_text, page.url):
+        # HTTP 200 with no rendered text is not confirmation. Never continue
+        # into searches for an empty document.
+        if not body_text:
+            log(f"[{bookmaker}] FAST-FAIL empty body -> NOT_CONFIRMED")
+            return {
+                "bookmaker": bookmaker,
+                "status": "NOT_CONFIRMED",
+                "final_url": final_url,
+                "matches": [],
+            }
+
+        if protection_detected(title, body_text, final_url):
             log(f"[{bookmaker}] CAPTCHA/Cloudflare -> SKIP")
             return {
                 "bookmaker": bookmaker,
@@ -2523,7 +2583,7 @@ def scan_bookmakers(matches):
         if FREE_MODE:
             # Give Chromium's child process a short window to exit before
             # another browser is launched.
-            time.sleep(0.25)
+            time.sleep(0.5)
             if memory_guarded(FREE_MEMORY_GUARD_MB):
                 log("[BOOKMAKERS] Memory guard after cleanup -> stop this cycle")
                 break
@@ -2928,10 +2988,10 @@ def scanner_loop():
     )
 
     log(
-        "[START] V3.12 overlap protection=ENABLED"
+        "[START] V3.20 overlap protection=ENABLED"
     )
     log(
-        "[START] V3.12 Chromium launch serialization=ENABLED"
+        "[START] V3.20 Chromium launch serialization=ENABLED"
     )
 
     log(
@@ -2945,10 +3005,10 @@ def scanner_loop():
         f"{'AVAILABLE' if PLAYWRIGHT_AVAILABLE else 'NOT INSTALLED'}"
     )
     log("[START] Playwright API=ASYNC (safe for asyncio and Render)")
+    log("[START] V3.20 fast-fail=HTTP 401/403/429/451 + blocked URLs + empty body")
     log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms")
     log("[START] Health endpoint: /health")
     log(f"[START] FREE_MODE={FREE_MODE} | memory_guard={FREE_MEMORY_GUARD_MB:.0f}MB | batch={FREE_BOOKMAKER_BATCH_SIZE} | bookmaker_timeout={FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS}s | kooora_timeout={KOOORA_HARD_TIMEOUT_SECONDS}s")
-    log("[START] V3.19 fast-fail HTTP protection/empty-body/block-URL=ENABLED")
     log(f"[START] discovery_links={MAX_DISCOVERY_LINKS} | candidate_pages={MAX_CANDIDATE_PAGES_PER_MATCH} | search_variants={MAX_SEARCH_VARIANTS} | search_inputs={MAX_SEARCH_INPUTS}")
 
     if not PLAYWRIGHT_AVAILABLE:
@@ -3077,7 +3137,7 @@ if __name__ == "__main__":
 
     # V3.12: no Telegram startup diagnostic. A restart must not create
     # noise or consume Telegram requests; real alerts remain unchanged.
-    log("[MAIN] V3.12 startup diagnostic Telegram disabled")
+    log("[MAIN] V3.20 startup diagnostic Telegram disabled")
 
     # One scanner thread only.
     scanner_thread = threading.Thread(
