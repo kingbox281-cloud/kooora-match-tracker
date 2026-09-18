@@ -130,7 +130,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_20_FREE_FAST_FAIL"
+APP_VERSION = "KOOORA_BROWSER_V3_21_FREE_KOOORA_FIX"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -189,6 +189,14 @@ MAX_EVENT_BLOCKS = int(
 HTTP_TIMEOUT = int(
     os.getenv("HTTP_TIMEOUT", "20")
 )
+
+PREFLIGHT_CONNECT_TIMEOUT = float(os.getenv("PREFLIGHT_CONNECT_TIMEOUT", "3.0"))
+PREFLIGHT_READ_TIMEOUT = float(os.getenv("PREFLIGHT_READ_TIMEOUT", "4.0"))
+BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS = int(os.getenv("BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS", "180"))
+BOOKMAKER_TIMEOUT_COOLDOWN_SECONDS = int(os.getenv("BOOKMAKER_TIMEOUT_COOLDOWN_SECONDS", "90"))
+BOOKMAKER_ERROR_COOLDOWN_SECONDS = int(os.getenv("BOOKMAKER_ERROR_COOLDOWN_SECONDS", "60"))
+KOOORA_ANOMALY_MIN_HTML_BYTES = int(os.getenv("KOOORA_ANOMALY_MIN_HTML_BYTES", "2500000"))
+KOOORA_ANOMALY_MIN_CARDS = int(os.getenv("KOOORA_ANOMALY_MIN_CARDS", "500"))
 
 
 # ============================================================
@@ -361,6 +369,26 @@ scan_lock = threading.Lock()
 browser_launch_lock = threading.Lock()
 bookmaker_rotation_lock = threading.Lock()
 bookmaker_rotation_index = 0
+bookmaker_cooldowns = {}
+bookmaker_cooldown_lock = threading.Lock()
+
+def set_bookmaker_cooldown(bookmaker, seconds, reason):
+    with bookmaker_cooldown_lock:
+        bookmaker_cooldowns[bookmaker] = {
+            "until": time.monotonic() + max(1, seconds),
+            "reason": reason,
+        }
+
+def bookmaker_cooldown_remaining(bookmaker):
+    with bookmaker_cooldown_lock:
+        item = bookmaker_cooldowns.get(bookmaker)
+        if not item:
+            return 0.0, ""
+        remaining = item["until"] - time.monotonic()
+        if remaining <= 0:
+            bookmaker_cooldowns.pop(bookmaker, None)
+            return 0.0, ""
+        return remaining, item["reason"]
 
 
 # ============================================================
@@ -826,6 +854,23 @@ def fetch_kooora_html():
 
     return ""
 
+def kooora_html_signature(html):
+    if not html:
+        return {"bytes": 0, "cards": 0, "phases": 0, "anomalous": True}
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        cards = soup.select(".fco-match-list-item") or soup.select("[data-match-status]")
+        phase_hits = 0
+        for card in cards[:250]:
+            status = clean_text(card.get("data-match-status", "")).upper()
+            text = clean_text(card.get_text(" ", strip=True))
+            if status in {"LIVE", "RESULT", "FIXTURE"} or detect_kooora_phase(card, status, text) in {"HT", "FT"}:
+                phase_hits += 1
+        anomalous = len(html) >= KOOORA_ANOMALY_MIN_HTML_BYTES and len(cards) >= KOOORA_ANOMALY_MIN_CARDS and phase_hits == 0
+        return {"bytes": len(html), "cards": len(cards), "phases": phase_hits, "anomalous": anomalous}
+    except Exception:
+        return {"bytes": len(html), "cards": 0, "phases": 0, "anomalous": False}
+
 def extract_score(text):
     text = clean_text(text)
 
@@ -1060,8 +1105,10 @@ def parse_kooora(html):
             candidates = extract_team_candidates(card)
 
             if len(candidates) < 2:
-                if status == "LIVE":
+                if status in {"LIVE", "RESULT"} or phase in {"HT", "FT"}:
                     skip_counts["NO_TEAMS"] += 1
+                    if skip_counts["NO_TEAMS"] <= 6:
+                        log(f"[KOOORA DEBUG] missing team pair | phase={phase} | status={status} | candidates={candidates[:8]} | text={text[:260]}")
                 continue
 
             home, away = candidates[0], candidates[1]
@@ -2531,6 +2578,49 @@ def select_bookmaker_batch():
         return selected
 
 
+def bookmaker_preflight(bookmaker, homepage_url):
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+        "Connection": "close",
+    }
+    started = time.monotonic()
+    try:
+        response = requests.get(
+            homepage_url, headers=headers, timeout=(PREFLIGHT_CONNECT_TIMEOUT, PREFLIGHT_READ_TIMEOUT),
+            allow_redirects=True, stream=True,
+        )
+        status = response.status_code
+        final_url = str(response.url or homepage_url)
+        snippet = ""
+        try:
+            chunk = next(response.iter_content(chunk_size=16384), b"")
+            snippet = chunk.decode("utf-8", errors="ignore")[:12000]
+        except Exception:
+            pass
+        finally:
+            try: response.close()
+            except Exception: pass
+        elapsed = time.monotonic() - started
+        log(f"[{bookmaker}] PRECHECK HTTP={status} final_url={final_url} elapsed={elapsed:.2f}s")
+        if fast_http_rejection_status(status) or fast_block_url(final_url):
+            log(f"[{bookmaker}] PRECHECK -> SKIP (blocked/CAPTCHA)")
+            return {"skip": True, "status": "CAPTCHA", "final_url": final_url}
+        if protection_detected("", snippet, final_url):
+            log(f"[{bookmaker}] PRECHECK -> SKIP (CAPTCHA marker)")
+            return {"skip": True, "status": "CAPTCHA", "final_url": final_url}
+        return {"skip": False, "status": "OK", "final_url": final_url}
+    except Exception as exc:
+        elapsed = time.monotonic() - started
+        log(f"[{bookmaker}] PRECHECK ERROR -> continue to browser | elapsed={elapsed:.2f}s | error={exc}")
+        return {"skip": False, "status": "PREFLIGHT_ERROR", "final_url": homepage_url}
+
+
 def scan_bookmakers(matches):
     results = []
 
@@ -2552,6 +2642,12 @@ def scan_bookmakers(matches):
     update_scanner_state(phase="BOOKMAKERS", last_error=None)
 
     for bookmaker, url in selected_bookmakers:
+        remaining, reason = bookmaker_cooldown_remaining(bookmaker)
+        if remaining > 0:
+            log(f"[BOOKMAKERS] COOLDOWN SKIP | {bookmaker} | remaining={remaining:.0f}s | reason={reason}")
+            results.append({"bookmaker": bookmaker, "status": "COOLDOWN", "final_url": url, "matches": []})
+            continue
+
         if FREE_MODE and memory_guarded(FREE_MEMORY_GUARD_MB):
             results.append({
                 "bookmaker": bookmaker,
@@ -2562,22 +2658,32 @@ def scan_bookmakers(matches):
             log(f"[BOOKMAKERS] MEMORY_GUARD -> skipping remaining site: {bookmaker}")
             break
 
+        preflight = bookmaker_preflight(bookmaker, url)
+        if preflight.get("skip"):
+            result = {"bookmaker": bookmaker, "status": preflight.get("status", "CAPTCHA"), "final_url": preflight.get("final_url", url), "matches": []}
+            results.append(result)
+            set_bookmaker_cooldown(bookmaker, BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS, "CAPTCHA/BLOCKED")
+            log(f"[{bookmaker}] COOLDOWN set | seconds={BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS} reason=CAPTCHA/BLOCKED")
+            continue
+
         try:
             result = browser_check_one(bookmaker, url, matches)
             results.append(result)
-            log(
-                f"[BOOKMAKERS] DONE | {bookmaker} | "
-                f"status={result.get('status')} | "
-                f"confirmed={len(result.get('matches', []))}"
-            )
+            status = result.get("status")
+            log(f"[BOOKMAKERS] DONE | {bookmaker} | status={status} | confirmed={len(result.get('matches', []))}")
+            if status in {"CAPTCHA", "PREFLIGHT_BLOCKED"}:
+                set_bookmaker_cooldown(bookmaker, BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS, status)
+            elif status in {"TIMEOUT", "HARD_TIMEOUT"}:
+                set_bookmaker_cooldown(bookmaker, BOOKMAKER_TIMEOUT_COOLDOWN_SECONDS, status)
+            elif status == "ERROR":
+                set_bookmaker_cooldown(bookmaker, BOOKMAKER_ERROR_COOLDOWN_SECONDS, status)
+            if status in {"CAPTCHA", "PREFLIGHT_BLOCKED", "TIMEOUT", "HARD_TIMEOUT", "ERROR"}:
+                seconds = BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS if status in {"CAPTCHA", "PREFLIGHT_BLOCKED"} else BOOKMAKER_TIMEOUT_COOLDOWN_SECONDS if status in {"TIMEOUT", "HARD_TIMEOUT"} else BOOKMAKER_ERROR_COOLDOWN_SECONDS
+                log(f"[{bookmaker}] COOLDOWN set | seconds={seconds} reason={status}")
         except Exception as exc:
             log(f"[BOOKMAKERS] {bookmaker} worker error: {exc}")
-            results.append({
-                "bookmaker": bookmaker,
-                "status": "ERROR",
-                "final_url": "",
-                "matches": [],
-            })
+            results.append({"bookmaker": bookmaker, "status": "ERROR", "final_url": "", "matches": []})
+            set_bookmaker_cooldown(bookmaker, BOOKMAKER_ERROR_COOLDOWN_SECONDS, "ERROR")
 
         gc.collect()
         if FREE_MODE:
@@ -2873,6 +2979,19 @@ def process_scan():
     log("[SCAN] Kooora parsing START")
 
     matches = parse_kooora(html)
+    signature = kooora_html_signature(html)
+    if not matches and signature.get("anomalous"):
+        log(f"[KOOORA] ANOMALOUS RESPONSE detected | bytes={signature.get('bytes')} cards={signature.get('cards')} phases={signature.get('phases')} -> retry")
+        retry_started = time.monotonic()
+        retry_html = fetch_kooora_html()
+        retry_matches = parse_kooora(retry_html) if retry_html else []
+        retry_sig = kooora_html_signature(retry_html)
+        if retry_matches or not retry_sig.get("anomalous"):
+            html = retry_html
+            matches = retry_matches
+            log(f"[KOOORA] RETRY selected | matches={len(matches)} bytes={len(retry_html)} elapsed={time.monotonic()-retry_started:.2f}s")
+        else:
+            log("[KOOORA] RETRY still anomalous; retaining first response result")
     parse_elapsed = time.monotonic() - parse_started
     update_scanner_state(last_kooora_matches=len(matches))
 
@@ -3005,7 +3124,7 @@ def scanner_loop():
         f"{'AVAILABLE' if PLAYWRIGHT_AVAILABLE else 'NOT INSTALLED'}"
     )
     log("[START] Playwright API=ASYNC (safe for asyncio and Render)")
-    log("[START] V3.20 fast-fail=HTTP 401/403/429/451 + blocked URLs + empty body")
+    log("[START] V3.21 preflight=HTTP block/CAPTCHA skip + bookmaker cooldowns")
     log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms")
     log("[START] Health endpoint: /health")
     log(f"[START] FREE_MODE={FREE_MODE} | memory_guard={FREE_MEMORY_GUARD_MB:.0f}MB | batch={FREE_BOOKMAKER_BATCH_SIZE} | bookmaker_timeout={FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS}s | kooora_timeout={KOOORA_HARD_TIMEOUT_SECONDS}s")
@@ -3157,3 +3276,4 @@ if __name__ == "__main__":
         debug=False,
         use_reloader=False,
     )
+     
