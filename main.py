@@ -11,6 +11,7 @@ import unicodedata
 import gc
 import multiprocessing as mp
 import resource
+import socket
 from pathlib import Path
 from datetime import datetime
 
@@ -34,7 +35,7 @@ except Exception:
 
 # ============================================================
 # KOOORA MATCH TRACKER
-# VERSION 3.13
+# VERSION 3.16
 #
 # Main rule:
 #     DOUBT = REJECT
@@ -51,6 +52,10 @@ except Exception:
 # CAPTCHA / Cloudflare / anti-bot:
 #     NEVER bypassed.
 #     Protected bookmaker is skipped.
+#
+# V3.16 diagnostics:
+#     Startup-only network probes record public IP, DNS, and Kooora HTTPS status.
+#     They do not alter the scanner/alert logic.
 # ============================================================
 
 
@@ -83,6 +88,244 @@ def update_scanner_state(**updates):
 def get_scanner_state():
     with scanner_state_lock:
         return dict(scanner_state)
+
+
+# ============================================================
+# NETWORK DIAGNOSTICS
+# ============================================================
+# V3.16 diagnostic only:
+# These tests do not change match parsing, bookmaker matching,
+# alert rules, Telegram logic, or scan rotation. They only record
+# whether the Render container can resolve/reach Kooora and what
+# public outbound IP is visible from the container.
+
+network_diag_lock = threading.Lock()
+network_diag = {
+    "ran_at": None,
+    "public_ip": None,
+    "public_ip_error": None,
+    "kooora_dns": None,
+    "kooora_dns_error": None,
+    "telegram_dns": None,
+    "telegram_dns_error": None,
+    "kooora_http_status": None,
+    "kooora_http_url": None,
+    "kooora_http_elapsed_seconds": None,
+    "kooora_http_content_type": None,
+    "kooora_http_content_length": None,
+    "kooora_http_server": None,
+    "kooora_http_error": None,
+    "kooora_fallback_http_status": None,
+    "kooora_fallback_http_url": None,
+    "kooora_fallback_http_elapsed_seconds": None,
+    "kooora_fallback_http_error": None,
+}
+
+
+def update_network_diag(**updates):
+    with network_diag_lock:
+        network_diag.update(updates)
+
+
+def get_network_diag():
+    with network_diag_lock:
+        return dict(network_diag)
+
+
+def _dns_diagnostic(hostname):
+    """Resolve IPv4/IPv6 addresses without changing application behavior."""
+    try:
+        infos = socket.getaddrinfo(
+            hostname,
+            443,
+            type=socket.SOCK_STREAM,
+        )
+
+        addresses = []
+        for info in infos:
+            address = info[4][0]
+            if address not in addresses:
+                addresses.append(address)
+
+        return addresses, None
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+
+
+def _http_probe(url, label, timeout_seconds=8):
+    """Small streaming GET probe: status/headers only, no page body stored."""
+    started = time.monotonic()
+
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "ar,en;q=0.8",
+            },
+            timeout=timeout_seconds,
+            allow_redirects=True,
+            stream=True,
+        )
+
+        elapsed = round(time.monotonic() - started, 2)
+        final_url = response.url
+        status = response.status_code
+        content_type = response.headers.get("content-type", "")
+        content_length = response.headers.get("content-length", "")
+        server = response.headers.get("server", "")
+
+        # Do not download/store the body. This is intentionally a network probe.
+        response.close()
+
+        log(
+            f"[NET] {label} HTTP={status} elapsed={elapsed:.2f}s "
+            f"final_url={final_url} content_type={content_type} "
+            f"content_length={content_length} server={server}"
+        )
+
+        return {
+            "status": status,
+            "url": final_url,
+            "elapsed": elapsed,
+            "content_type": content_type,
+            "content_length": content_length,
+            "server": server,
+            "error": None,
+        }
+
+    except Exception as exc:
+        elapsed = round(time.monotonic() - started, 2)
+        error = f"{type(exc).__name__}: {exc}"
+        log(
+            f"[NET] {label} ERROR elapsed={elapsed:.2f}s {error}"
+        )
+        return {
+            "status": None,
+            "url": None,
+            "elapsed": elapsed,
+            "content_type": None,
+            "content_length": None,
+            "server": None,
+            "error": error,
+        }
+
+
+def run_network_diagnostics():
+    """Run once at startup; diagnostics are read-only and non-invasive."""
+    log("[NET] ==================================================")
+    log("[NET] V3.16 network diagnostics START")
+
+    update_network_diag(
+        ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        public_ip=None,
+        public_ip_error=None,
+        kooora_dns=None,
+        kooora_dns_error=None,
+        telegram_dns=None,
+        telegram_dns_error=None,
+        kooora_http_status=None,
+        kooora_http_url=None,
+        kooora_http_elapsed_seconds=None,
+        kooora_http_content_type=None,
+        kooora_http_content_length=None,
+        kooora_http_server=None,
+        kooora_http_error=None,
+        kooora_fallback_http_status=None,
+        kooora_fallback_http_url=None,
+        kooora_fallback_http_elapsed_seconds=None,
+        kooora_fallback_http_error=None,
+    )
+
+    # 1) Public outbound IP. This is what external services see.
+    try:
+        started = time.monotonic()
+        response = requests.get(
+            "https://api.ipify.org?format=json",
+            timeout=8,
+        )
+        elapsed = time.monotonic() - started
+        data = response.json()
+        public_ip = clean_text(data.get("ip", ""))
+
+        if response.status_code == 200 and public_ip:
+            update_network_diag(public_ip=public_ip)
+            log(
+                f"[NET] PUBLIC IP={public_ip} "
+                f"elapsed={elapsed:.2f}s"
+            )
+        else:
+            error = f"HTTP {response.status_code} | body={response.text[:120]}"
+            update_network_diag(public_ip_error=error)
+            log(f"[NET] PUBLIC IP ERROR {error}")
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        update_network_diag(public_ip_error=error)
+        log(f"[NET] PUBLIC IP ERROR {error}")
+
+    # 2) DNS resolution.
+    kooora_dns, kooora_dns_error = _dns_diagnostic("www.kooora.com")
+    update_network_diag(
+        kooora_dns=kooora_dns,
+        kooora_dns_error=kooora_dns_error,
+    )
+    if kooora_dns:
+        log(f"[NET] DNS www.kooora.com -> {', '.join(kooora_dns)}")
+    else:
+        log(f"[NET] DNS www.kooora.com ERROR {kooora_dns_error}")
+
+    telegram_dns, telegram_dns_error = _dns_diagnostic("api.telegram.org")
+    update_network_diag(
+        telegram_dns=telegram_dns,
+        telegram_dns_error=telegram_dns_error,
+    )
+    if telegram_dns:
+        log(f"[NET] DNS api.telegram.org -> {', '.join(telegram_dns)}")
+    else:
+        log(f"[NET] DNS api.telegram.org ERROR {telegram_dns_error}")
+
+    # 3) Direct Kooora HTTPS probes.
+    primary = _http_probe(
+        KOOORA_URL,
+        "KOOORA PRIMARY PROBE",
+        timeout_seconds=8,
+    )
+    update_network_diag(
+        kooora_http_status=primary["status"],
+        kooora_http_url=primary["url"],
+        kooora_http_elapsed_seconds=primary["elapsed"],
+        kooora_http_content_type=primary["content_type"],
+        kooora_http_content_length=primary["content_length"],
+        kooora_http_server=primary["server"],
+        kooora_http_error=primary["error"],
+    )
+
+    fallback = _http_probe(
+        KOOORA_FALLBACK_URL,
+        "KOOORA FALLBACK PROBE",
+        timeout_seconds=8,
+    )
+    update_network_diag(
+        kooora_fallback_http_status=fallback["status"],
+        kooora_fallback_http_url=fallback["url"],
+        kooora_fallback_http_elapsed_seconds=fallback["elapsed"],
+        kooora_fallback_http_error=fallback["error"],
+    )
+
+    diag = get_network_diag()
+    log(
+        "[NET] SUMMARY | "
+        f"public_ip={diag.get('public_ip') or 'UNKNOWN'} | "
+        f"kooora_dns={len(diag.get('kooora_dns') or [])} addresses | "
+        f"kooora_primary_http={diag.get('kooora_http_status') or 'ERROR'} | "
+        f"kooora_fallback_http={diag.get('kooora_fallback_http_status') or 'ERROR'}"
+    )
+    log("[NET] V3.16 network diagnostics END")
+    log("[NET] ==================================================")
 
 
 # ============================================================
@@ -130,7 +373,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_15_FREE_KOOORA_HARD_TIMEOUT_ROTATION"
+APP_VERSION = "KOOORA_BROWSER_V3_16_DIAGNOSTIC"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -392,6 +635,14 @@ def health():
         "workers": MAX_BROWSER_WORKERS,
         "min_match_confidence": MIN_MATCH_CONFIDENCE,
         "scanner": state,
+    }
+
+
+@app.route("/diagnostics")
+def diagnostics():
+    return {
+        "version": APP_VERSION,
+        "network": get_network_diag(),
     }
 
 
@@ -3139,7 +3390,14 @@ if __name__ == "__main__":
 
     # V3.12: no Telegram startup diagnostic. A restart must not create
     # noise or consume Telegram requests; real alerts remain unchanged.
-    log("[MAIN] V3.12 startup diagnostic Telegram disabled")
+    log("[MAIN] V3.16 startup diagnostic Telegram disabled")
+
+    # V3.16: read-only network diagnosis. No Telegram message is sent.
+    try:
+        run_network_diagnostics()
+    except Exception as exc:
+        log(f"[NET] Diagnostics unhandled error: {type(exc).__name__}: {exc}")
+        log(traceback.format_exc())
 
     # One scanner thread only.
     scanner_thread = threading.Thread(
