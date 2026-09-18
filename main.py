@@ -34,7 +34,7 @@ except Exception:
 
 # ============================================================
 # KOOORA MATCH TRACKER
-# VERSION 3.21
+# VERSION 3.13
 #
 # Main rule:
 #     DOUBT = REJECT
@@ -130,7 +130,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_21_FREE_PRECHECK"
+APP_VERSION = "KOOORA_BROWSER_V3_20_FREE_FAST_FAIL"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -189,15 +189,6 @@ MAX_EVENT_BLOCKS = int(
 HTTP_TIMEOUT = int(
     os.getenv("HTTP_TIMEOUT", "20")
 )
-
-# V3.21: cheap HTTP preflight before Chromium.
-# A preflight block is only used to skip sites with explicit evidence of
-# access denial/protection. A normal preflight error never blocks the browser.
-PREFLIGHT_CONNECT_TIMEOUT = float(os.getenv("PREFLIGHT_CONNECT_TIMEOUT", "3.0"))
-PREFLIGHT_READ_TIMEOUT = float(os.getenv("PREFLIGHT_READ_TIMEOUT", "4.0"))
-BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS = int(os.getenv("BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS", "180"))
-BOOKMAKER_TIMEOUT_COOLDOWN_SECONDS = int(os.getenv("BOOKMAKER_TIMEOUT_COOLDOWN_SECONDS", "90"))
-BOOKMAKER_ERROR_COOLDOWN_SECONDS = int(os.getenv("BOOKMAKER_ERROR_COOLDOWN_SECONDS", "60"))
 
 
 # ============================================================
@@ -371,11 +362,6 @@ browser_launch_lock = threading.Lock()
 bookmaker_rotation_lock = threading.Lock()
 bookmaker_rotation_index = 0
 
-# V3.21: temporary cooldowns for sites that are explicitly protected/blocked
-# or repeatedly time out. NOT_CONFIRMED is never cooled down.
-bookmaker_cooldowns = {}
-bookmaker_cooldown_lock = threading.Lock()
-
 
 # ============================================================
 # FLASK
@@ -405,7 +391,6 @@ def health():
         "scan_seconds": SCAN_SECONDS,
         "workers": MAX_BROWSER_WORKERS,
         "min_match_confidence": MIN_MATCH_CONFIDENCE,
-        "bookmaker_cooldowns": bookmaker_cooldown_snapshot(),
         "scanner": state,
     }
 
@@ -977,124 +962,73 @@ def extract_kooora_score(card, text):
     return None, None
 
 
-def _kooora_clean_team_value(value):
-    value = clean_text(value)
-    if not value:
-        return ""
-    value = re.sub(r"\b(?:FT|HT|LIVE|FIXTURE|RESULT|PREMATCH|SCHEDULED)\b", " ", value, flags=re.I)
-    value = re.sub(r"\b\d{1,2}\s*[-:]\s*\d{1,2}\b", " ", value)
-    value = clean_text(value)
-    if not value or len(normalize_team(value)) < 2:
-        return ""
-    low = normalize_team(value).lower()
-    bad = {
-        "مباريات اليوم", "النتائج", "والنتائج", "الدوري", "الإنجليزي",
-        "الممتاز", "today", "matches", "results", "football", "soccer",
-        "live", "ft", "ht",
-    }
-    if low in bad:
-        return ""
-    return value
-
-
-def _kooora_attr_value(tag, names):
-    for name in names:
-        value = tag.get(name, "")
-        if isinstance(value, (list, tuple)):
-            value = " ".join(str(x) for x in value)
-        value = _kooora_clean_team_value(value)
-        if value:
-            return value
-    return ""
-
-
-def _kooora_role_candidate(card, role):
-    """Find an explicitly labelled home/away team without guessing."""
-    role = role.lower()
-    attrs = (
-        f"data-{role}-team", f"data-{role}-team-name", f"data-{role}",
-        f"data-team-{role}", f"data-{role}-name",
-    )
-    value = _kooora_attr_value(card, attrs)
-    if value:
-        return value
-
-    explicit_selectors = [
-        f"[class*='{role}-team']", f"[class*='{role}Team']",
-        f"[class*='team-{role}']", f"[class*='team{role.capitalize()}']",
-        f"[data-{role}-team-name]", f"[data-{role}-team]",
-        f"[data-team-{role}]",
-    ]
-    for selector in explicit_selectors:
-        try:
-            for el in card.select(selector):
-                value = _kooora_attr_value(el, attrs) or _kooora_clean_team_value(el.get_text(" ", strip=True))
-                if value:
-                    return value
-        except Exception:
-            continue
-    return ""
-
-
 def extract_team_candidates(card):
     """Extract likely team names while filtering navigation/status noise."""
     selectors = [
-        ".fco-team-name", ".fco-team-name a",
-        "[class*='team-name']", "[class*='teamName']",
-        "[class*='participant']", "[class*='competitor']",
-        "[data-team-name]", "[data-team]",
+        ".fco-team-name",
+        ".fco-team-name a",
+        "[class*='team-name']",
+        "[class*='teamName']",
+        "[class*='participant']",
+        "[class*='competitor']",
+        "[data-team-name]",
     ]
+
     candidates = []
     seen = set()
 
     def add(value):
-        value = _kooora_clean_team_value(value)
+        value = clean_text(value)
         if not value:
             return
-        norm = normalize_team(value)
-        if norm in seen:
+
+        value = re.sub(
+            r"\b(?:FT|HT|LIVE|FIXTURE|RESULT|PREMATCH|SCHEDULED)\b",
+            " ", value, flags=re.I
+        )
+        value = clean_text(value)
+        if not value:
             return
+
+        if re.fullmatch(r"\d{1,2}\s*[-:]\s*\d{1,2}", value):
+            return
+
+        norm = normalize_team(value)
+        if len(norm) < 2 or norm in seen:
+            return
+
+        # Reject obvious status/navigation fragments.
+        low = norm.lower()
+        bad = {
+            "مباريات اليوم", "النتائج", "والنتائج", "الدوري", "الإنجليزي",
+            "الممتاز", "today", "matches", "results", "football", "soccer",
+        }
+        if low in bad:
+            return
+
         seen.add(norm)
         candidates.append(value)
 
-    # DOM order is preserved. Prefer the smallest team-name nodes rather than
-    # their parent containers to avoid duplicating home/away blocks.
+    # Prefer explicit team-name/data-team-name elements.
     for selector in selectors:
         try:
             for element in card.select(selector):
-                value = element.get("data-team-name", "") or element.get("data-team", "") or element.get_text(" ", strip=True)
+                value = element.get("data-team-name", "") or element.get_text(" ", strip=True)
                 add(value)
         except Exception:
             continue
 
+    # Last-resort fallback: only links with team-like class/id, not every link.
     if len(candidates) < 2:
         try:
             for element in card.find_all("a"):
-                attrs = " ".join(str(element.get(k, "")) for k in ("class", "id", "href", "data-team", "data-team-name")).lower()
+                attrs = " ".join(str(element.get(k, "")) for k in ("class", "id", "href")).lower()
                 if any(x in attrs for x in ("team", "participant", "competitor", "club")):
-                    add(element.get("data-team-name", "") or element.get("data-team", "") or element.get_text(" ", strip=True))
+                    add(element.get_text(" ", strip=True))
         except Exception:
             pass
 
     return candidates
-
-
-def extract_kooora_team_pair(card):
-    """Conservative Kooora home/away extraction. Never invents the away team."""
-    home = _kooora_role_candidate(card, "home")
-    away = _kooora_role_candidate(card, "away")
-    if home and away and normalize_team(home) != normalize_team(away):
-        return home, away
-
-    # Kooora currently exposes team-name elements in DOM order on many cards.
-    # Use the first two distinct team-name candidates only if both exist.
-    candidates = extract_team_candidates(card)
-    if len(candidates) >= 2:
-        a, b = candidates[0], candidates[1]
-        if normalize_team(a) and normalize_team(b) and normalize_team(a) != normalize_team(b):
-            return a, b
-
-    return "", ""
 
 
 def parse_kooora(html):
@@ -1123,19 +1057,14 @@ def parse_kooora(html):
 
             text = clean_text(card.get_text(" ", strip=True))
             phase = detect_kooora_phase(card, status, text)
-            home, away = extract_kooora_team_pair(card)
+            candidates = extract_team_candidates(card)
 
-            if not home or not away:
-                if status == "LIVE" or phase in {"HT", "FT"}:
+            if len(candidates) < 2:
+                if status == "LIVE":
                     skip_counts["NO_TEAMS"] += 1
-                    if phase in {"HT", "FT"} and skip_counts["NO_TEAMS"] <= 10:
-                        attrs = _kooora_attribute_text(card)
-                        log(
-                            f"[KOOORA DEBUG] HT/FT team extraction failed | "
-                            f"phase={phase} attrs={attrs[:220]} | text={text[:320]}"
-                        )
                 continue
 
+            home, away = candidates[0], candidates[1]
             home_norm, away_norm = normalize_team(home), normalize_team(away)
             if not home_norm or not away_norm or home_norm == away_norm:
                 skip_counts["NO_TEAMS"] += 1
@@ -1242,130 +1171,6 @@ def fast_http_rejection_status(status_code):
 def fast_block_url(url):
     low = clean_text(url).lower()
     return any(marker in low for marker in FAST_BLOCK_URL_MARKERS)
-
-
-def set_bookmaker_cooldown(bookmaker, seconds, reason):
-    until = time.monotonic() + max(1, int(seconds))
-    with bookmaker_cooldown_lock:
-        previous = bookmaker_cooldowns.get(bookmaker, {}).get("until", 0.0)
-        if until < previous:
-            until = previous
-        bookmaker_cooldowns[bookmaker] = {"until": until, "reason": reason}
-    log(f"[{bookmaker}] COOLDOWN set | seconds={max(1, int(seconds))} reason={reason}")
-
-
-def bookmaker_cooldown_remaining(bookmaker):
-    with bookmaker_cooldown_lock:
-        item = bookmaker_cooldowns.get(bookmaker)
-        if not item:
-            return 0.0, ""
-        remaining = item["until"] - time.monotonic()
-        if remaining <= 0:
-            bookmaker_cooldowns.pop(bookmaker, None)
-            return 0.0, ""
-        return remaining, item.get("reason", "")
-
-
-def bookmaker_cooldown_snapshot():
-    snapshot = {}
-    with bookmaker_cooldown_lock:
-        now = time.monotonic()
-        expired = []
-        for bookmaker, item in bookmaker_cooldowns.items():
-            remaining = item["until"] - now
-            if remaining <= 0:
-                expired.append(bookmaker)
-                continue
-            snapshot[bookmaker] = {
-                "remaining_seconds": round(remaining, 1),
-                "reason": item.get("reason", ""),
-            }
-        for bookmaker in expired:
-            bookmaker_cooldowns.pop(bookmaker, None)
-    return snapshot
-
-
-def _preflight_protection_snippet(text):
-    low = clean_text(text).lower()
-    return any(marker in low for marker in CAPTCHA_MARKERS)
-
-
-def preflight_bookmaker(bookmaker, homepage_url):
-    """Cheap requests preflight. Never bypasses anti-bot systems.
-
-    Returns: (status, final_url, http_status, reason)
-    status is one of OK, BLOCKED, PROTECTED, ERROR.
-    Only BLOCKED/PROTECTED are authoritative enough to skip Chromium.
-    """
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "de-DE,de;q=0.9,en;q=0.7",
-        "Connection": "close",
-    }
-    started = time.monotonic()
-    try:
-        response = requests.get(
-            homepage_url,
-            headers=headers,
-            timeout=(PREFLIGHT_CONNECT_TIMEOUT, PREFLIGHT_READ_TIMEOUT),
-            allow_redirects=True,
-            stream=True,
-        )
-        final_url = clean_text(response.url)
-        status = int(response.status_code)
-
-        if fast_http_rejection_status(status):
-            try:
-                response.close()
-            except Exception:
-                pass
-            log(f"[{bookmaker}] PRECHECK HTTP={status} final={final_url} elapsed={time.monotonic()-started:.2f}s -> SKIP")
-            return "BLOCKED", final_url, status, f"HTTP_{status}"
-
-        if fast_block_url(final_url):
-            try:
-                response.close()
-            except Exception:
-                pass
-            log(f"[{bookmaker}] PRECHECK blocked URL final={final_url} elapsed={time.monotonic()-started:.2f}s -> SKIP")
-            return "BLOCKED", final_url, status, "BLOCKED_URL"
-
-        # Read only a tiny prefix. This is enough to detect explicit CAPTCHA pages
-        # without downloading a large homepage. Normal 200 pages continue to Chromium.
-        snippet = b""
-        try:
-            chunk = next(response.iter_content(chunk_size=4096), b"")
-            snippet = chunk[:4096] if chunk else b""
-        except Exception:
-            pass
-        finally:
-            try:
-                response.close()
-            except Exception:
-                pass
-
-        text = snippet.decode("utf-8", errors="ignore")
-        if _preflight_protection_snippet(text):
-            log(f"[{bookmaker}] PRECHECK protection marker final={final_url} elapsed={time.monotonic()-started:.2f}s -> SKIP")
-            return "PROTECTED", final_url, status, "PROTECTION_MARKER"
-
-        log(f"[{bookmaker}] PRECHECK HTTP={status} final={final_url} elapsed={time.monotonic()-started:.2f}s -> CONTINUE")
-        return "OK", final_url, status, ""
-
-    except requests.exceptions.Timeout as exc:
-        log(f"[{bookmaker}] PRECHECK TIMEOUT elapsed={time.monotonic()-started:.2f}s -> CONTINUE_BROWSER error={exc}")
-        return "ERROR", homepage_url, 0, "TIMEOUT"
-    except requests.exceptions.RequestException as exc:
-        log(f"[{bookmaker}] PRECHECK ERROR elapsed={time.monotonic()-started:.2f}s -> CONTINUE_BROWSER error={exc}")
-        return "ERROR", homepage_url, 0, "REQUEST_ERROR"
-    except Exception as exc:
-        log(f"[{bookmaker}] PRECHECK UNEXPECTED elapsed={time.monotonic()-started:.2f}s -> CONTINUE_BROWSER error={exc}")
-        return "ERROR", homepage_url, 0, "UNEXPECTED_ERROR"
 
 
 async def safe_body_text(page):
@@ -2733,7 +2538,7 @@ def scan_bookmakers(matches):
         return results
 
     selected_bookmakers = select_bookmaker_batch()
-    worker_count = 1
+    worker_count = 1  # Free profile: never allow browser concurrency.
 
     bookmakers_started = time.monotonic()
     gc.collect()
@@ -2748,55 +2553,36 @@ def scan_bookmakers(matches):
 
     for bookmaker, url in selected_bookmakers:
         if FREE_MODE and memory_guarded(FREE_MEMORY_GUARD_MB):
-            results.append({"bookmaker": bookmaker, "status": "MEMORY_GUARD", "final_url": url, "matches": []})
-            log(f"[BOOKMAKERS] MEMORY_GUARD -> skipping remaining site: {bookmaker}")
-            break
-
-        remaining, reason = bookmaker_cooldown_remaining(bookmaker)
-        if remaining > 0:
-            log(f"[{bookmaker}] COOLDOWN active | remaining={remaining:.1f}s reason={reason}")
-            results.append({"bookmaker": bookmaker, "status": "COOLDOWN", "final_url": url, "matches": []})
-            continue
-
-        # ----------------------------------------------------
-        # V3.21 PRECHECK BEFORE CHROMIUM
-        # ----------------------------------------------------
-        pre_status, pre_url, pre_http, pre_reason = preflight_bookmaker(bookmaker, url)
-        if pre_status in {"BLOCKED", "PROTECTED"}:
-            set_bookmaker_cooldown(bookmaker, BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS, pre_reason)
             results.append({
                 "bookmaker": bookmaker,
-                "status": "CAPTCHA",
-                "final_url": pre_url or url,
+                "status": "MEMORY_GUARD",
+                "final_url": url,
                 "matches": [],
             })
-            log(f"[BOOKMAKERS] PRECHECK SKIP | {bookmaker} | status=CAPTCHA reason={pre_reason}")
-            continue
+            log(f"[BOOKMAKERS] MEMORY_GUARD -> skipping remaining site: {bookmaker}")
+            break
 
         try:
             result = browser_check_one(bookmaker, url, matches)
             results.append(result)
-            status = result.get("status")
             log(
                 f"[BOOKMAKERS] DONE | {bookmaker} | "
-                f"status={status} | "
+                f"status={result.get('status')} | "
                 f"confirmed={len(result.get('matches', []))}"
             )
-
-            if status == "CAPTCHA":
-                set_bookmaker_cooldown(bookmaker, BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS, "BROWSER_PROTECTION")
-            elif status in {"TIMEOUT", "HARD_TIMEOUT"}:
-                set_bookmaker_cooldown(bookmaker, BOOKMAKER_TIMEOUT_COOLDOWN_SECONDS, status)
-            elif status == "ERROR":
-                set_bookmaker_cooldown(bookmaker, BOOKMAKER_ERROR_COOLDOWN_SECONDS, "ERROR")
-
         except Exception as exc:
             log(f"[BOOKMAKERS] {bookmaker} worker error: {exc}")
-            results.append({"bookmaker": bookmaker, "status": "ERROR", "final_url": "", "matches": []})
-            set_bookmaker_cooldown(bookmaker, BOOKMAKER_ERROR_COOLDOWN_SECONDS, "WORKER_ERROR")
+            results.append({
+                "bookmaker": bookmaker,
+                "status": "ERROR",
+                "final_url": "",
+                "matches": [],
+            })
 
         gc.collect()
         if FREE_MODE:
+            # Give Chromium's child process a short window to exit before
+            # another browser is launched.
             time.sleep(0.5)
             if memory_guarded(FREE_MEMORY_GUARD_MB):
                 log("[BOOKMAKERS] Memory guard after cleanup -> stop this cycle")
@@ -3351,12 +3137,7 @@ if __name__ == "__main__":
 
     # V3.12: no Telegram startup diagnostic. A restart must not create
     # noise or consume Telegram requests; real alerts remain unchanged.
-    log("[MAIN] V3.21 startup diagnostic Telegram disabled")
-    log(
-        f"[START] V3.21 preflight=ENABLED | connect={PREFLIGHT_CONNECT_TIMEOUT}s "
-        f"read={PREFLIGHT_READ_TIMEOUT}s | captcha_cooldown={BOOKMAKER_CAPTCHA_COOLDOWN_SECONDS}s "
-        f"timeout_cooldown={BOOKMAKER_TIMEOUT_COOLDOWN_SECONDS}s"
-    )
+    log("[MAIN] V3.20 startup diagnostic Telegram disabled")
 
     # One scanner thread only.
     scanner_thread = threading.Thread(
