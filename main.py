@@ -1151,41 +1151,57 @@ def _strip_team_code(value):
 
 
 def _remove_repeated_team_name(value):
-    """Collapse only an exact adjacent duplication of a team name."""
+    """Collapse only a provable A-B-A-B style duplicate team label.
+
+    Kooora sometimes puts the visible team name and a nested duplicate label
+    into the same match anchor. Compare normalized tokens so Arabic spacing,
+    punctuation, and Unicode normalization cannot prevent a safe dedup.
+    Never remove text unless the two halves are exactly equal after
+    normalization.
+    """
     value = clean_text(value)
     if not value:
         return value
+
+    normalized = normalize_team(value)
+    tokens = normalized.split()
+    if len(tokens) >= 2 and len(tokens) % 2 == 0:
+        half = len(tokens) // 2
+        if tokens[:half] == tokens[half:]:
+            return " ".join(tokens[:half]).strip()
+
+    # Also catch a duplicated complete phrase separated by punctuation while
+    # preserving the original spelling when no normalization is needed.
     parts = value.split()
     if len(parts) >= 2 and len(parts) % 2 == 0:
         half = len(parts) // 2
-        if parts[:half] == parts[half:]:
+        if normalize_team(" ".join(parts[:half])) == normalize_team(" ".join(parts[half:])):
             return " ".join(parts[:half]).strip()
+
     return value
 
 
-def extract_pair_from_match_link(card):
-    """Extract the real Home/Away pair from Kooora's match link text.
+def extract_match_link_details(card):
+    """Extract Home/Away teams and scores from Kooora match-link text.
 
-    Kooora renders many score/HT cards as one anchor containing:
+    Typical Kooora result/halftime link text is:
     HOME [CODE] SCORE AWAY [CODE] SCORE STATUS
-    This is more reliable than generic .team selectors, which can expose
-    duplicate/partial labels on HT cards.
+    Example: مونزا MON 1 ساسولو SAS 0 استراحة
+    Returns (home, away, home_score, away_score).
     """
     try:
         anchors = card.find_all("a")
     except Exception:
-        return None, None
+        return None, None, None, None
 
     for el in anchors:
         text = clean_text(el.get_text(" ", strip=True))
         if not text or len(text) < 8:
             continue
         low = text.lower()
-        if not any(marker in low for marker in ("استراحة", "انتهت", "'", "’")):
+        if not any(marker in low for marker in ("استراحة", "انتهت", "full time", "finished", "'", "’")):
             continue
 
-        # Split around the two score numbers. This intentionally accepts
-        # multilingual team names and optional Latin team codes.
         m = re.match(
             r"^(?P<home>.+?)\s+(?P<hscore>\d{1,2})\s+"
             r"(?P<away>.+?)\s+(?P<ascore>\d{1,2})\s*(?P<tail>.*)$",
@@ -1197,12 +1213,17 @@ def extract_pair_from_match_link(card):
 
         home = _remove_repeated_team_name(_strip_team_code(m.group("home")))
         away = _remove_repeated_team_name(_strip_team_code(m.group("away")))
+        try:
+            home_score = int(m.group("hscore"))
+            away_score = int(m.group("ascore"))
+        except (TypeError, ValueError):
+            continue
+
         home_norm = normalize_team(home)
         away_norm = normalize_team(away)
         if len(home_norm) < 2 or len(away_norm) < 2 or home_norm == away_norm:
             continue
 
-        # Reject obvious navigation/status fragments.
         bad = {
             "استراحة", "انتهت", "مباشر", "شاهد مباشرة",
             "مباريات اليوم", "النتائج", "والنتائج",
@@ -1210,9 +1231,15 @@ def extract_pair_from_match_link(card):
         if home_norm.lower() in bad or away_norm.lower() in bad:
             continue
 
-        return home, away
+        return home, away, home_score, away_score
 
-    return None, None
+    return None, None, None, None
+
+
+def extract_pair_from_match_link(card):
+    """Backward-compatible Home/Away extraction from the match link."""
+    home, away, _, _ = extract_match_link_details(card)
+    return home, away
 
 
 def extract_team_candidates(card):
@@ -1247,14 +1274,18 @@ def parse_kooora(html):
             text = clean_text(card.get_text(" ", strip=True))
             phase = detect_kooora_phase(card, status, text)
 
-            # V3.22: HT/FT cards are parsed from the actual match anchor first.
+            # V3.23: HT/FT cards are parsed from the actual match anchor first.
             # This fixes Kooora cards where generic team selectors return only
             # the home label or a partial/duplicate away label.
             home, away = (None, None)
+            link_home_score, link_away_score = (None, None)
             if phase in {"HT", "FT"}:
-                home, away = extract_pair_from_match_link(card)
-                if home and away:
-                    log(f"[KOOORA V3.23] {phase} link pair -> {home} - {away}")
+                (
+                    home,
+                    away,
+                    link_home_score,
+                    link_away_score,
+                ) = extract_match_link_details(card)
 
             if not home or not away:
                 home, away = extract_team_pair(card)
@@ -1281,10 +1312,16 @@ def parse_kooora(html):
                 skip_counts["NO_TEAMS"] += 1
                 continue
 
-            home_score, away_score = extract_kooora_score(card, text)
+            # Prefer the score from the same match link used for the team pair.
+            # This is especially important for HT cards where the visible card
+            # text may not expose the score to the generic score extractor.
+            if link_home_score is not None and link_away_score is not None:
+                home_score, away_score = link_home_score, link_away_score
+            else:
+                home_score, away_score = extract_kooora_score(card, text)
 
             # FT must have a confirmed score. HT may legitimately lack a
-            # parsed score because the live score can be rendered separately.
+            # parsed score when the live score is rendered separately.
             if phase == "FT" and (home_score is None or away_score is None):
                 skip_counts["NO_SCORE"] += 1
                 continue
@@ -3223,10 +3260,10 @@ def scanner_loop():
     )
 
     log(
-        "[START] V3.20 overlap protection=ENABLED"
+        "[START] V3.24 overlap protection=ENABLED"
     )
     log(
-        "[START] V3.20 Chromium launch serialization=ENABLED"
+        "[START] V3.24 Chromium launch serialization=ENABLED"
     )
 
     log(
@@ -3240,7 +3277,7 @@ def scanner_loop():
         f"{'AVAILABLE' if PLAYWRIGHT_AVAILABLE else 'NOT INSTALLED'}"
     )
     log("[START] Playwright API=ASYNC (safe for asyncio and Render)")
-    log("[START] V3.21 fast-fail=HTTP 401/403/429/451 + blocked URLs + CAPTCHA cooldown")
+    log("[START] V3.24 fast-fail=HTTP 401/403/429/451 + blocked URLs + CAPTCHA cooldown")
     log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms")
     log("[START] Health endpoint: /health")
     log(f"[START] FREE_MODE={FREE_MODE} | memory_guard={FREE_MEMORY_GUARD_MB:.0f}MB | batch={FREE_BOOKMAKER_BATCH_SIZE} | bookmaker_timeout={FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS}s | kooora_timeout={KOOORA_HARD_TIMEOUT_SECONDS}s")
@@ -3372,7 +3409,7 @@ if __name__ == "__main__":
 
     # V3.12: no Telegram startup diagnostic. A restart must not create
     # noise or consume Telegram requests; real alerts remain unchanged.
-    log("[MAIN] V3.21 startup diagnostic Telegram disabled")
+    log("[MAIN] V3.23 startup diagnostic Telegram disabled")
 
     # One scanner thread only.
     scanner_thread = threading.Thread(
