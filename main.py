@@ -34,7 +34,7 @@ except Exception:
 
 # ============================================================
 # KOOORA MATCH TRACKER
-# VERSION 3.13
+# VERSION 3.19
 #
 # Main rule:
 #     DOUBT = REJECT
@@ -130,7 +130,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_18_FREE_BOOKMAKER_OPTIMIZED"
+APP_VERSION = "KOOORA_BROWSER_V3_19_FREE_FAST_FAIL"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -145,7 +145,7 @@ BROWSER_TIMEOUT_MS = int(
 )
 
 BROWSER_WAIT_MS = int(
-    os.getenv("BROWSER_WAIT_MS", "1500")
+    os.getenv("BROWSER_WAIT_MS", "800")
 )
 
 MAX_BROWSER_WORKERS = int(
@@ -169,7 +169,7 @@ FREE_MODE = os.getenv("FREE_MODE", "1").strip() == "1"
 FREE_MEMORY_GUARD_MB = float(os.getenv("FREE_MEMORY_GUARD_MB", "380"))
 FREE_BOOKMAKER_BATCH_SIZE = int(os.getenv("FREE_BOOKMAKER_BATCH_SIZE", "2"))
 FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS = int(
-    os.getenv("FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS", "15")
+    os.getenv("FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS", "12")
 )
 KOOORA_HARD_TIMEOUT_SECONDS = int(
     os.getenv("KOOORA_HARD_TIMEOUT_SECONDS", "25")
@@ -2523,7 +2523,7 @@ def scan_bookmakers(matches):
         if FREE_MODE:
             # Give Chromium's child process a short window to exit before
             # another browser is launched.
-            time.sleep(0.5)
+            time.sleep(0.25)
             if memory_guarded(FREE_MEMORY_GUARD_MB):
                 log("[BOOKMAKERS] Memory guard after cleanup -> stop this cycle")
                 break
@@ -2948,6 +2948,7 @@ def scanner_loop():
     log(f"[START] HTTP_TIMEOUT={HTTP_TIMEOUT}s | BROWSER_TIMEOUT_MS={BROWSER_TIMEOUT_MS} | BROWSER_WAIT_MS={BROWSER_WAIT_MS}ms")
     log("[START] Health endpoint: /health")
     log(f"[START] FREE_MODE={FREE_MODE} | memory_guard={FREE_MEMORY_GUARD_MB:.0f}MB | batch={FREE_BOOKMAKER_BATCH_SIZE} | bookmaker_timeout={FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS}s | kooora_timeout={KOOORA_HARD_TIMEOUT_SECONDS}s")
+    log("[START] V3.19 fast-fail HTTP protection/empty-body/block-URL=ENABLED")
     log(f"[START] discovery_links={MAX_DISCOVERY_LINKS} | candidate_pages={MAX_CANDIDATE_PAGES_PER_MATCH} | search_variants={MAX_SEARCH_VARIANTS} | search_inputs={MAX_SEARCH_INPUTS}")
 
     if not PLAYWRIGHT_AVAILABLE:
