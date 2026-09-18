@@ -130,7 +130,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_22_HT_AWAY_FIX"
+APP_VERSION = "KOOORA_BROWSER_V3_23_CLEAN_TEAM_NAMES"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -1150,6 +1150,19 @@ def _strip_team_code(value):
     return value
 
 
+def _remove_repeated_team_name(value):
+    """Collapse only an exact adjacent duplication of a team name."""
+    value = clean_text(value)
+    if not value:
+        return value
+    parts = value.split()
+    if len(parts) >= 2 and len(parts) % 2 == 0:
+        half = len(parts) // 2
+        if parts[:half] == parts[half:]:
+            return " ".join(parts[:half]).strip()
+    return value
+
+
 def extract_pair_from_match_link(card):
     """Extract the real Home/Away pair from Kooora's match link text.
 
@@ -1182,8 +1195,8 @@ def extract_pair_from_match_link(card):
         if not m:
             continue
 
-        home = _strip_team_code(m.group("home"))
-        away = _strip_team_code(m.group("away"))
+        home = _remove_repeated_team_name(_strip_team_code(m.group("home")))
+        away = _remove_repeated_team_name(_strip_team_code(m.group("away")))
         home_norm = normalize_team(home)
         away_norm = normalize_team(away)
         if len(home_norm) < 2 or len(away_norm) < 2 or home_norm == away_norm:
@@ -1241,7 +1254,7 @@ def parse_kooora(html):
             if phase in {"HT", "FT"}:
                 home, away = extract_pair_from_match_link(card)
                 if home and away:
-                    log(f"[KOOORA V3.22] link pair -> {home} - {away}")
+                    log(f"[KOOORA V3.23] {phase} link pair -> {home} - {away}")
 
             if not home or not away:
                 home, away = extract_team_pair(card)
