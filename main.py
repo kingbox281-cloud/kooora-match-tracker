@@ -130,7 +130,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_15_FREE_KOOORA_HARD_TIMEOUT_ROTATION"
+APP_VERSION = "KOOORA_BROWSER_V3_18_FREE_BOOKMAKER_OPTIMIZED"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -145,7 +145,7 @@ BROWSER_TIMEOUT_MS = int(
 )
 
 BROWSER_WAIT_MS = int(
-    os.getenv("BROWSER_WAIT_MS", "5000")
+    os.getenv("BROWSER_WAIT_MS", "1500")
 )
 
 MAX_BROWSER_WORKERS = int(
@@ -169,16 +169,16 @@ FREE_MODE = os.getenv("FREE_MODE", "1").strip() == "1"
 FREE_MEMORY_GUARD_MB = float(os.getenv("FREE_MEMORY_GUARD_MB", "380"))
 FREE_BOOKMAKER_BATCH_SIZE = int(os.getenv("FREE_BOOKMAKER_BATCH_SIZE", "2"))
 FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS = int(
-    os.getenv("FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS", "22")
+    os.getenv("FREE_BOOKMAKER_HARD_TIMEOUT_SECONDS", "15")
 )
 KOOORA_HARD_TIMEOUT_SECONDS = int(
     os.getenv("KOOORA_HARD_TIMEOUT_SECONDS", "25")
 )
 MAX_DISCOVERY_LINKS = int(os.getenv("MAX_DISCOVERY_LINKS", "5" if FREE_MODE else "30"))
-MAX_CANDIDATE_PAGES_PER_MATCH = int(os.getenv("MAX_CANDIDATE_PAGES_PER_MATCH", "5" if FREE_MODE else "25"))
+MAX_CANDIDATE_PAGES_PER_MATCH = int(os.getenv("MAX_CANDIDATE_PAGES_PER_MATCH", "3" if FREE_MODE else "25"))
 MAX_SEARCH_VARIANTS = int(os.getenv("MAX_SEARCH_VARIANTS", "1" if FREE_MODE else "3"))
 MAX_SEARCH_INPUTS = int(os.getenv("MAX_SEARCH_INPUTS", "1" if FREE_MODE else "3"))
-MAX_SEARCH_LINKS = int(os.getenv("MAX_SEARCH_LINKS", "3" if FREE_MODE else "20"))
+MAX_SEARCH_LINKS = int(os.getenv("MAX_SEARCH_LINKS", "2" if FREE_MODE else "20"))
 MAX_EVENT_BLOCKS_FREE = int(os.getenv("MAX_EVENT_BLOCKS_FREE", "120"))
 
 # Maximum number of candidate DOM event blocks inspected.
@@ -2239,7 +2239,7 @@ async def browser_check_one_async(
                         wait_until="domcontentloaded",
                         timeout=goto_timeout_ms(),
                     )
-                    wait_ms = min(3000, BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
+                    wait_ms = min(1500, BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
                     if wait_ms > 0:
                         await page.wait_for_timeout(wait_ms)
                 except Exception:
@@ -2281,7 +2281,7 @@ async def browser_check_one_async(
                     wait_until="domcontentloaded",
                     timeout=goto_timeout_ms(),
                 )
-                wait_ms = min(2500, BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
+                wait_ms = min(1200, BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
                 if wait_ms > 0:
                     await page.wait_for_timeout(wait_ms)
             except Exception:
@@ -2315,7 +2315,7 @@ async def browser_check_one_async(
                         wait_until="domcontentloaded",
                         timeout=goto_timeout_ms(),
                     )
-                    wait_ms = min(3000, BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
+                    wait_ms = min(1500, BROWSER_WAIT_MS, max(0, _deadline_remaining_ms(deadline) - 250))
                     if wait_ms > 0:
                         await page.wait_for_timeout(wait_ms)
                 except Exception:
