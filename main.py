@@ -130,7 +130,7 @@ def memory_guarded(limit_mb=380.0):
 # CONFIG
 # ============================================================
 
-APP_VERSION = "KOOORA_BROWSER_V3_21_FREE_KOOORA_FIX"
+APP_VERSION = "KOOORA_BROWSER_V3_22_HT_AWAY_FIX"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -1141,6 +1141,67 @@ def extract_team_pair(card):
 
     return None, None
 
+def _strip_team_code(value):
+    value = clean_text(value)
+    if not value:
+        return value
+    # Kooora commonly renders: Team Name CODE
+    value = re.sub(r"\s+[A-Z]{2,5}$", "", value).strip()
+    return value
+
+
+def extract_pair_from_match_link(card):
+    """Extract the real Home/Away pair from Kooora's match link text.
+
+    Kooora renders many score/HT cards as one anchor containing:
+    HOME [CODE] SCORE AWAY [CODE] SCORE STATUS
+    This is more reliable than generic .team selectors, which can expose
+    duplicate/partial labels on HT cards.
+    """
+    try:
+        anchors = card.find_all("a")
+    except Exception:
+        return None, None
+
+    for el in anchors:
+        text = clean_text(el.get_text(" ", strip=True))
+        if not text or len(text) < 8:
+            continue
+        low = text.lower()
+        if not any(marker in low for marker in ("استراحة", "انتهت", "'", "’")):
+            continue
+
+        # Split around the two score numbers. This intentionally accepts
+        # multilingual team names and optional Latin team codes.
+        m = re.match(
+            r"^(?P<home>.+?)\s+(?P<hscore>\d{1,2})\s+"
+            r"(?P<away>.+?)\s+(?P<ascore>\d{1,2})\s*(?P<tail>.*)$",
+            text,
+            flags=re.S,
+        )
+        if not m:
+            continue
+
+        home = _strip_team_code(m.group("home"))
+        away = _strip_team_code(m.group("away"))
+        home_norm = normalize_team(home)
+        away_norm = normalize_team(away)
+        if len(home_norm) < 2 or len(away_norm) < 2 or home_norm == away_norm:
+            continue
+
+        # Reject obvious navigation/status fragments.
+        bad = {
+            "استراحة", "انتهت", "مباشر", "شاهد مباشرة",
+            "مباريات اليوم", "النتائج", "والنتائج",
+        }
+        if home_norm.lower() in bad or away_norm.lower() in bad:
+            continue
+
+        return home, away
+
+    return None, None
+
+
 def extract_team_candidates(card):
     """Compatibility wrapper around the stricter pair extractor."""
     home, away = extract_team_pair(card)
@@ -1172,13 +1233,35 @@ def parse_kooora(html):
 
             text = clean_text(card.get_text(" ", strip=True))
             phase = detect_kooora_phase(card, status, text)
-            home, away = extract_team_pair(card)
+
+            # V3.22: HT/FT cards are parsed from the actual match anchor first.
+            # This fixes Kooora cards where generic team selectors return only
+            # the home label or a partial/duplicate away label.
+            home, away = (None, None)
+            if phase in {"HT", "FT"}:
+                home, away = extract_pair_from_match_link(card)
+                if home and away:
+                    log(f"[KOOORA V3.22] link pair -> {home} - {away}")
+
+            if not home or not away:
+                home, away = extract_team_pair(card)
 
             if not home or not away:
                 if status == "LIVE" or phase in {"HT", "FT"}:
                     skip_counts["NO_TEAMS"] += 1
                     if phase in {"HT", "FT"} and skip_counts["NO_TEAMS"] <= 5:
-                        log(f"[KOOORA DEBUG] {phase} missing team pair | text={text[:260]}")
+                        try:
+                            link_debug = " || ".join(
+                                clean_text(a.get_text(" ", strip=True))
+                                for a in card.find_all("a")
+                                if clean_text(a.get_text(" ", strip=True))
+                            )
+                        except Exception:
+                            link_debug = ""
+                        log(
+                            f"[KOOORA DEBUG] {phase} missing team pair | "
+                            f"links={link_debug[:420]} | text={text[:260]}"
+                        )
                 continue
             home_norm, away_norm = normalize_team(home), normalize_team(away)
             if not home_norm or not away_norm or home_norm == away_norm:
